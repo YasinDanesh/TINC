@@ -220,6 +220,21 @@ class OctTreeMLP(nn.Module):
             self.predict_dfs(self.base_node, index, batch_size, input)
         self.merge()
         # self.predict_data = self.predict_data.detach().numpy()
+        #addd
+        flat_pred = self.predict_data.reshape(-1).astype(np.float64)
+        flat_gt   = self.data.detach().cpu().numpy().reshape(-1).astype(np.float64)
+
+        # sample to keep it fast
+        n = min(200_000, flat_pred.size)
+        idx = np.random.choice(flat_pred.size, size=n, replace=False)
+
+        # least-squares solve for y ≈ a * y_pred + b
+        X = np.vstack([flat_pred[idx], np.ones(n)]).T
+        a, b = np.linalg.lstsq(X, flat_gt[idx], rcond=None)[0]
+
+        # apply calibration in normalized space
+        self.predict_data = (a * self.predict_data + b).astype(np.float32)
+        #addd
         self.predict_data = self.predict_data.clip(self.side_info['scale_min'], self.side_info['scale_max'])
         self.predict_data = invnormalize_data(self.predict_data, **self.side_info)
         self.move2device(device=self.device)
