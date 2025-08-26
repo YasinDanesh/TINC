@@ -49,11 +49,39 @@ def normalize_data(data:np.ndarray, scale_min, scale_max):
     side_info = {'scale_min':scale_min, 'scale_max':scale_max, 'data_min':data_min, 'data_max':data_max, 'dtype':dtype}
     return data, side_info
 
-def invnormalize_data(data:np.ndarray, scale_min, scale_max, data_min, data_max, dtype):
-    data = (data - scale_min)/(scale_max - scale_min)
-    data = data*(data_max - data_min) + data_min
-    data = data.astype(dtype=dtype)
-    return data
+# def invnormalize_data(data:np.ndarray, scale_min, scale_max, data_min, data_max, dtype):
+#     data = (data - scale_min)/(scale_max - scale_min)
+#     data = data*(data_max - data_min) + data_min
+#     data = data.astype(dtype=dtype)
+#     return data
+
+#addd
+def invnormalize_data(data, scale_min, scale_max, data_min, data_max, dtype, **kwargs):
+    """
+    Inverse of normalize_data. Accepts extra kwargs (e.g., shape, raw_dtype, origin_bytes)
+    without error. Works with numpy arrays or torch tensors. Handles dtype given as str/dtype.
+    """
+    # ensure numpy array
+    if isinstance(data, torch.Tensor):
+        data = data.detach().cpu().numpy()
+    # robust dtype
+    try:
+        dtype_np = np.dtype(dtype)
+    except Exception:
+        dtype_np = np.dtype('float32')
+
+    # inverse normalize (work in float64 to avoid rounding)
+    data = data.astype(np.float64, copy=False)
+    data = (data - float(scale_min)) / (float(scale_max) - float(scale_min))
+    data = data * (float(data_max) - float(data_min)) + float(data_min)
+
+    # if target is integer, clip to valid range before casting
+    if np.issubdtype(dtype_np, np.integer):
+        info = np.iinfo(dtype_np)
+        data = np.clip(data, info.min, info.max)
+
+    return data.astype(dtype_np)
+#adddd
 
 def cal_hidden_output(param, layer, input, output:int=None):
     if output != None:  
@@ -74,14 +102,42 @@ def cal_hidden_output(param, layer, input, output:int=None):
     return hidden, output
 
 class OctTreeMLP(nn.Module):
-    def __init__(self, opt) -> None:
+    #def __init__(self, opt) -> None:
+    def __init__(self, opt, origin_shape=None, load_data: bool = True, **kwargs) -> None:
         super().__init__()
         self.opt = opt
         self.max_level = len(opt.Network.level_info)-1
-        self.data_path = opt.Path
         self.device = opt.Train.device
-        self.data, self.side_info = normalize_data(read_img(self.data_path), opt.Preprocess.normal_min, opt.Preprocess.normal_max)
+        #addd
+        # Support both opt.Path and opt.CompressFramwork.Path
+        self.data_path = getattr(opt, "Path", None)
+        if self.data_path is None and hasattr(opt, "CompressFramwork"):
+            self.data_path = getattr(opt.CompressFramwork, "Path", None)
+        #self.data, self.side_info = normalize_data(read_img(self.data_path), opt.Preprocess.normal_min, opt.Preprocess.normal_max)
+        if load_data and self.data_path:
+            # TRAIN/EVAL: read ground-truth image
+            self.data, self.side_info = normalize_data(
+                read_img(self.data_path),
+                opt.Preprocess.normal_min,
+                opt.Preprocess.normal_max
+            )
+        else:
+            # DECODE (no-reference): don't read GT
+            if origin_shape is None:
+                # must be provided by loader; keep a safe fallback to avoid crashes
+                origin_shape = (1, 128, 128, opt.Network.output)
+            # dummy tensor only to infer tiling/coords
+            self.data = torch.zeros(origin_shape, dtype=torch.float32, device="cpu")
+            self.side_info = {
+                "scale_min": opt.Preprocess.normal_min,
+                "scale_max": opt.Preprocess.normal_max,
+                "data_min": 0.0,
+                "data_max": 1.0,
+                "dtype": np.uint16,
+            }
+        #adddd 
         self.loss_weight = opt.Train.weight
+        self.has_gt = bool(load_data and self.data_path)   
 
         self.init_tree()
         self.init_network()
@@ -106,7 +162,30 @@ class OctTreeMLP(nn.Module):
     def get_hyper(self):
         # Parameter allocation scheme: (1) ratio between levels (2) parameter allocation in the same level
         ratio = self.opt.Ratio
-        origin_bytes = os.path.getsize(self.data_path)
+        #origin_bytes = os.path.getsize(self.data_path)
+        #addd
+        # Use file size if available; else fall back to saved stats / shape
+        if getattr(self, "data_path", None) and os.path.exists(self.data_path):
+            origin_bytes = os.path.getsize(self.data_path)
+        else:
+            if "origin_bytes" in self.side_info:
+                origin_bytes = int(self.side_info["origin_bytes"])
+            else:
+                # compute from shape × raw dtype
+                shape = tuple(self.side_info.get("shape", ())) or tuple(getattr(self.data, "shape", ()))
+                if not shape:
+                    raise RuntimeError("No-reference decode: need 'origin_bytes' or 'shape' in side_info.")
+
+                # robustly get itemsize from whatever we stored (str, type, dtype, etc.)
+                raw_dt = self.side_info.get("raw_dtype", self.side_info.get("dtype", "uint16"))
+                try:
+                    itemsize = np.dtype(raw_dt).itemsize
+                except Exception:
+                    itemsize = np.dtype("uint16").itemsize  # safe fallback
+
+                origin_bytes = int(np.prod(shape) * itemsize)
+        #adddd
+
         ideal_bytes = int(origin_bytes/ratio)
         ideal_params = int(ideal_bytes/4)
         level_info = self.opt.Network.level_info
@@ -201,12 +280,36 @@ class OctTreeMLP(nn.Module):
         self.params_total = 0
         for node in self.node_list:
             self.params_total += sum([p.data.nelement() for p in node.net.net.parameters()])
-        bytes = self.params_total*4
-        origin_bytes = os.path.getsize(self.data_path)
-        self.ratio = origin_bytes/bytes
+        # bytes = self.params_total*4
+        # origin_bytes = os.path.getsize(self.data_path)
+        # self.ratio = origin_bytes/bytes
+        # print(f'Number of network parameters: {self.params_total}')
+        # print('Network bytes: {:.2f}KB({:.2f}MB); Origin bytes: {:.2f}KB({:.2f}MB)'.format(bytes/1024, bytes/1024**2, origin_bytes/1024, origin_bytes/1024**2))
+        # print('Compression ratio: {:.2f}'.format(self.ratio))
+        #addd
+        bytes = self.params_total * 4
+
+        # origin_bytes fallback (same logic as in get_hyper)
+        if getattr(self, "data_path", None) and os.path.exists(self.data_path):
+            origin_bytes = os.path.getsize(self.data_path)
+        else:
+            if "origin_bytes" in self.side_info:
+                origin_bytes = int(self.side_info["origin_bytes"])
+            else:
+                shape = tuple(self.side_info.get("shape", ())) or tuple(getattr(self.data, "shape", ()))
+                raw_dt = self.side_info.get("raw_dtype", self.side_info.get("dtype", "uint16"))
+                try:
+                    itemsize = np.dtype(raw_dt).itemsize
+                except Exception:
+                    itemsize = np.dtype("uint16").itemsize
+                origin_bytes = int(np.prod(shape) * itemsize)
+
+        self.ratio = origin_bytes / bytes if bytes else float("inf")
+
         print(f'Number of network parameters: {self.params_total}')
         print('Network bytes: {:.2f}KB({:.2f}MB); Origin bytes: {:.2f}KB({:.2f}MB)'.format(bytes/1024, bytes/1024**2, origin_bytes/1024, origin_bytes/1024**2))
         print('Compression ratio: {:.2f}'.format(self.ratio))
+        #adddd
         return self.params_total
         
     """predict in batches"""
@@ -221,20 +324,21 @@ class OctTreeMLP(nn.Module):
         self.merge()
         # self.predict_data = self.predict_data.detach().numpy()
         #addd
-        flat_pred = self.predict_data.reshape(-1).astype(np.float64)
-        flat_gt   = self.data.detach().cpu().numpy().reshape(-1).astype(np.float64)
+        if getattr(self, "has_gt", False):
+            flat_pred = self.predict_data.reshape(-1).astype(np.float64)
+            flat_gt   = self.data.detach().cpu().numpy().reshape(-1).astype(np.float64)
 
-        # sample to keep it fast
-        n = min(200_000, flat_pred.size)
-        idx = np.random.choice(flat_pred.size, size=n, replace=False)
+            # sample to keep it fast
+            n = min(200_000, flat_pred.size)
+            idx = np.random.choice(flat_pred.size, size=n, replace=False)
 
-        # least-squares solve for y ≈ a * y_pred + b
-        X = np.vstack([flat_pred[idx], np.ones(n)]).T
-        a, b = np.linalg.lstsq(X, flat_gt[idx], rcond=None)[0]
+            # least-squares solve for y ≈ a * y_pred + b
+            X = np.vstack([flat_pred[idx], np.ones(n)]).T
+            a, b = np.linalg.lstsq(X, flat_gt[idx], rcond=None)[0]
 
-        # apply calibration in normalized space
-        self.predict_data = (a * self.predict_data + b).astype(np.float32)
-        #addd
+            # apply calibration in normalized space
+            self.predict_data = (a * self.predict_data + b).astype(np.float32)
+        #adddd
         self.predict_data = self.predict_data.clip(self.side_info['scale_min'], self.side_info['scale_max'])
         self.predict_data = invnormalize_data(self.predict_data, **self.side_info)
         self.move2device(device=self.device)

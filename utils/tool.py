@@ -1,24 +1,60 @@
 import cv2
 import tifffile
 import os
+import numpy as np
 
-def get_type_max(data):
-    dtype = data.dtype.name
-    if dtype == 'uint8':
-        max = 255
-    elif dtype == 'uint12':
-        max = 4098
-    elif dtype == 'uint16':
-        max = 65535
-    elif dtype == 'float32':
-        max = 65535
-    elif dtype == 'float64':
-        max = 65535
-    elif dtype == 'int16':
-        max = 65535   
-    else:
-        raise NotImplementedError
-    return max
+# def get_type_max(data):
+#     dtype = data.dtype.name
+#     if dtype == 'uint8':
+#         max = 255
+#     elif dtype == 'uint12':
+#         max = 4098
+#     elif dtype == 'uint16':
+#         max = 65535
+#     elif dtype == 'float32':
+#         max = 65535
+#     elif dtype == 'float64':
+#         max = 65535
+#     elif dtype == 'int16':
+#         max = 65535   
+#     else:
+#         raise NotImplementedError
+#     return max
+
+def get_type_max(data: np.ndarray) -> float:
+    dt = data.dtype
+
+    if np.issubdtype(dt, np.integer):
+        info = np.iinfo(dt)
+        vmin = int(np.min(data))
+        vmax = int(np.max(data))
+
+        # Unsigned ints
+        if info.min == 0:
+            # Heuristic: 12-bit content stored in uint16
+            if info.bits == 16 and vmax <= 4095:
+                return 4095.0
+            return float(info.max)
+
+        # Signed ints
+        if vmin >= 0:
+            # data never goes negative → treat like unsigned
+            return float(info.max)
+        # otherwise use full value range as the peak
+        return float(info.max - info.min)
+
+    if np.issubdtype(dt, np.floating):
+        vmin = float(np.min(data))
+        vmax = float(np.max(data))
+        # Common conventions
+        if vmin >= -1e-6 and vmax <= 1.0 + 1e-6:
+            return 1.0
+        if vmin >= -1e-6 and vmax <= 100.0 + 1e-6:
+            return 100.0
+        # Fallback: use the actual max magnitude seen
+        return max(abs(vmax), 1.0)
+
+    raise NotImplementedError(f"Unsupported dtype: {dt}")
 
 # 3d->dhwc or thwc 2d->hwc
 def read_img(path):

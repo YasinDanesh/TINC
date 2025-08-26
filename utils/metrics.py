@@ -28,12 +28,25 @@ def cal_iou_acc_pre(data_gt:np.ndarray,data_hat:np.ndarray,thres:float=1):
     pre = 1.0*tp/(tp+fp)
     return iou, acc, pre
 
-def cal_psnr(data_gt:np.ndarray, data_hat:np.ndarray, data_range):
-    data_gt = np.copy(data_gt)
-    data_hat = np.copy(data_hat)
-    mse = np.mean(np.power(data_gt/data_range-data_hat/data_range,2))
-    psnr = -10*np.log10(mse)
-    return psnr
+# def cal_psnr(data_gt:np.ndarray, data_hat:np.ndarray, data_range):
+#     data_gt = np.copy(data_gt)
+#     data_hat = np.copy(data_hat)
+#     mse = np.mean(np.power(data_gt/data_range-data_hat/data_range,2))
+#     psnr = -10*np.log10(mse)
+#     return psnr
+
+#addd
+def cal_psnr(data_gt: np.ndarray, data_hat: np.ndarray, data_range):
+    # Standard PSNR: 10*log10(peak^2 / MSE).
+    # Do NOT rescale the arrays inside this function—just use the peak you pass in.
+    gt  = data_gt.astype(np.float64, copy=False)
+    hat = data_hat.astype(np.float64, copy=False)
+    mse = np.mean((gt - hat) ** 2, dtype=np.float64)
+    if not np.isfinite(mse) or mse <= 0.0:
+        return float("inf")
+    peak = float(data_range)
+    return 10.0 * np.log10((peak * peak) / mse)
+#adddd
 
 def eval_performance(orig_data, decompressed_data):
     max_range = get_type_max(orig_data)
