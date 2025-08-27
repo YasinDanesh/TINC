@@ -7,6 +7,8 @@ from omegaconf import OmegaConf
 from utils.Network import MLP
 from utils.OctTree import OctTreeMLP
 #addd
+from utils.OctTree import _fit_affine, _tile_boxes
+
 def _jsonable(o):
     import numpy as _np
     if isinstance(o, (_np.integer, _np.floating, _np.bool_)):
@@ -130,13 +132,52 @@ def save_tree_models(tree_mlp:OctTreeMLP, model_dir:str):
 
     # compute origin_bytes from shape × raw dtype (so decode never needs the source TIFF)
     try:
-        itemsize = _np.dtype(raw_dt_str).itemsize
+        itemsize = np.dtype(raw_dt_str).itemsize
         stats["origin_bytes"] = int((int(shape[0]) * int(shape[1]) * int(shape[2]) * int(shape[3])) * itemsize)
     except Exception:
         # safe fallback if shape is missing
         stats["origin_bytes"] = None
     with open(os.path.join(model_dir, "norm_stats.json"), "w") as f:
         json.dump(stats, f)
+
+    # === BEGIN: write calibration files (global for 2-level; per-leaf for 3+ levels) ===
+    try:
+        # Get a normalized prediction WITHOUT calibration and WITHOUT denorm
+        pred_norm = tree_mlp.predict(device='cpu', batch_size=131072, apply_calibration=False, denorm=False)
+        if isinstance(pred_norm, torch.Tensor):
+            pred_norm = pred_norm.detach().cpu().numpy()
+
+        # Ground-truth in normalized space (available at encode/train time)
+        gt_norm = tree_mlp.data.detach().cpu().numpy() if hasattr(tree_mlp, "data") and (tree_mlp.data is not None) else None
+
+        if gt_norm is not None:
+            # Global (a,b) — tiny file, always useful
+            a, b = _fit_affine(pred_norm, gt_norm, sample=min(200_000, pred_norm.size))
+            with open(os.path.join(model_dir, "calib_global.json"), "w") as f:
+                json.dump({"a": float(a), "b": float(b)}, f)
+
+            # Per-leaf (a_ijk, b_ijk) if there are 3+ levels (64+ leaves)
+            num_levels = len(tree_mlp.opt.Network.level_info)
+            if num_levels >= 3:
+                boxes = _tile_boxes(pred_norm.shape, num_levels=num_levels)
+                d = 2 ** (num_levels - 1)
+                A = np.zeros((d, d, d), dtype=np.float32)
+                B = np.zeros((d, d, d), dtype=np.float32)
+                idx = 0
+                for zi in range(d):
+                    for yi in range(d):
+                        for xi in range(d):
+                            z0,z1,y0,y1,x0,x1 = boxes[idx]; idx += 1
+                            p = pred_norm[z0:z1, y0:y1, x0:x1, 0]
+                            g = gt_norm  [z0:z1, y0:y1, x0:x1, 0]
+                            a_, b_ = _fit_affine(p, g, sample=None)
+                            A[zi,yi,xi] = a_
+                            B[zi,yi,xi] = b_
+                np.savez_compressed(os.path.join(model_dir, "calib_leaves.npz"), a=A, b=B)
+    except Exception:
+        # don't break saving if calibration fails
+        pass
+    # === END: write calibration files ===
     #adddd
     opt_path = os.path.join(model_dir, 'opt.yaml')
     OmegaConf.save(tree_mlp.opt, opt_path)
@@ -164,6 +205,7 @@ def load_tree_models(model_dir:str):
 
     # Build WITHOUT reading the original image
     tree_mlp = OctTreeMLP(opt, origin_shape=origin_shape, load_data=False)
+    tree_mlp.model_dir = model_dir
     def _load_node_recursive(node, in_dim: int):
         # Use layer/act/output_act/w0 from placeholder hyper,
         # but infer hidden & output from the saved files on disk.

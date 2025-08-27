@@ -10,6 +10,42 @@ import torch.nn.functional as F
 from utils.tool import read_img, save_img
 from utils.Sampler import create_optim, create_flattened_coords, PointSampler, create_lr_scheduler
 from utils.Network import MLP
+import json
+
+#addd
+def _fit_affine(y_pred, y_true, sample=None):
+    """Least-squares fit y_true ≈ a*y_pred + b. Both arrays in the SAME (normalized) scale."""
+    p = y_pred.reshape(-1).astype(np.float64)
+    g = y_true.reshape(-1).astype(np.float64)
+    if sample and sample < p.size:
+        rng = np.random.default_rng(42)
+        idx = rng.choice(p.size, size=sample, replace=False)
+        p = p[idx]; g = g[idx]
+    X = np.vstack([p, np.ones_like(p)]).T
+    a, b = np.linalg.lstsq(X, g, rcond=None)[0]
+    return float(a), float(b)
+
+def _tile_boxes(shape_zyxc, num_levels):
+    """
+    Compute leaf boxes for a regular 2^L partition in Z,Y,X.
+    num_levels = len(level_info). Leaves per axis = 2**(num_levels-1).
+    Returns list of (z0,z1,y0,y1,x0,x1) in scan order.
+    """
+    Z, Y, X, _ = shape_zyxc
+    d = 2 ** (num_levels - 1)  # leaves per axis
+    def cuts(N, d):
+        q, r = divmod(N, d)
+        sizes = [q + (1 if i < r else 0) for i in range(d)]
+        edges = np.cumsum([0] + sizes)
+        return [(int(edges[i]), int(edges[i+1])) for i in range(d)]
+    zcuts, ycuts, xcuts = cuts(Z, d), cuts(Y, d), cuts(X, d)
+    boxes = []
+    for zi,(z0,z1) in enumerate(zcuts):
+        for yi,(y0,y1) in enumerate(ycuts):
+            for xi,(x0,x1) in enumerate(xcuts):
+                boxes.append((z0,z1,y0,y1,x0,x1))
+    return boxes
+#adddd
 
 class Node():
     def __init__(self, parent, level, origin_data, di, hi, wi):
@@ -313,7 +349,8 @@ class OctTreeMLP(nn.Module):
         return self.params_total
         
     """predict in batches"""
-    def predict(self, device:str='cpu', batch_size:int=128):
+    #def predict(self, device:str='cpu', batch_size:int=128):
+    def predict(self, device:str='cpu', batch_size:int=128, apply_calibration:bool=True, denorm:bool=True):
         self.predict_data = np.zeros_like(self.data)
         self.move2device(device=device)
         coords = self.sampler.coords.to(device)
@@ -323,24 +360,67 @@ class OctTreeMLP(nn.Module):
             self.predict_dfs(self.base_node, index, batch_size, input)
         self.merge()
         # self.predict_data = self.predict_data.detach().numpy()
+        # self.predict_data = self.predict_data.clip(self.side_info['scale_min'], self.side_info['scale_max'])
+        #self.predict_data = invnormalize_data(self.predict_data, **self.side_info)
         #addd
-        if getattr(self, "has_gt", False):
-            flat_pred = self.predict_data.reshape(-1).astype(np.float64)
-            flat_gt   = self.data.detach().cpu().numpy().reshape(-1).astype(np.float64)
+        # === BEGIN: calibration (use saved per-leaf/global if present; else fit once if GT is around) ===
+        if apply_calibration:
+            calib_applied = False
+            model_dir = getattr(self, "model_dir", None)  # set in ModelSave.load_tree_models
 
-            # sample to keep it fast
-            n = min(200_000, flat_pred.size)
-            idx = np.random.choice(flat_pred.size, size=n, replace=False)
+            # 1) Try per-leaf first (for 3+ levels), else global; works at pure decode.
+            try:
+                if model_dir is not None:
+                    leaf_npz = os.path.join(model_dir, "calib_leaves.npz")
+                    glob_json = os.path.join(model_dir, "calib_global.json")
+                    if os.path.exists(leaf_npz):
+                        arr = np.load(leaf_npz)
+                        A = arr["a"].astype(np.float32)
+                        B = arr["b"].astype(np.float32)
+                        boxes = _tile_boxes(self.predict_data.shape, num_levels=len(self.opt.Network.level_info))
+                        d = A.shape
+                        idx = 0
+                        for zi in range(d[0]):
+                            for yi in range(d[1]):
+                                for xi in range(d[2]):
+                                    z0,z1,y0,y1,x0,x1 = boxes[idx]; idx += 1
+                                    self.predict_data[z0:z1, y0:y1, x0:x1, 0] = \
+                                        A[zi,yi,xi] * self.predict_data[z0:z1, y0:y1, x0:x1, 0] + B[zi,yi,xi]
+                        calib_applied = True
+                    elif os.path.exists(glob_json):
+                        with open(glob_json, "r") as f:
+                            dct = json.load(f)
+                        a = float(dct.get("a", 1.0)); b = float(dct.get("b", 0.0))
+                        self.predict_data = a * self.predict_data + b
+                        calib_applied = True
+            except Exception:
+                # don't fail decode if files are missing/invalid
+                pass
 
-            # least-squares solve for y ≈ a * y_pred + b
-            X = np.vstack([flat_pred[idx], np.ones(n)]).T
-            a, b = np.linalg.lstsq(X, flat_gt[idx], rcond=None)[0]
+            # 2) Fallback during train/eval: fit a single (a,b) if GT in normalized space is available.
+            if (not calib_applied) and getattr(self, "has_gt", False) and (self.data is not None):
+                a, b = _fit_affine(self.predict_data, self.data, sample=200_000)
+                # sanity clamp; only apply if it helps
+                p = self.predict_data.reshape(-1).astype(np.float64)
+                g = self.data.detach().cpu().numpy().reshape(-1).astype(np.float64)
+                n = min(200_000, p.size)
+                rng = np.random.default_rng(42)
+                idx = rng.choice(p.size, size=n, replace=False)
+                X = np.vstack([p[idx], np.ones(n)]).T
+                mse_before = np.mean((p[idx] - g[idx])**2)
+                mse_after  = np.mean((a*p[idx] + b - g[idx])**2)
+                if mse_after < mse_before:
+                    self.predict_data = (a * self.predict_data + b).astype(np.float32)
+        # === END: calibration ===
 
-            # apply calibration in normalized space
-            self.predict_data = (a * self.predict_data + b).astype(np.float32)
+        # Denormalize if requested
+        if denorm:
+            self.predict_data = self.predict_data.clip(self.side_info['scale_min'], self.side_info['scale_max'])
+            self.predict_data = invnormalize_data(self.predict_data, **self.side_info)
+
+        self.move2device(device=self.device)
+        return self.predict_data
         #adddd
-        self.predict_data = self.predict_data.clip(self.side_info['scale_min'], self.side_info['scale_max'])
-        self.predict_data = invnormalize_data(self.predict_data, **self.side_info)
         self.move2device(device=self.device)
         return self.predict_data
     def predict_dfs(self, node, index, batch_size, input):
