@@ -370,7 +370,7 @@ class OctTreeMLP(nn.Module):
         self.move2device(device=device)
         coords = self.sampler.coords.to(device)
         # for index in range(0, coords.shape[0], batch_size):
-        for index in tqdm(range(0, coords.shape[0], batch_size), desc='Decompressing', leave=False, file=sys.stdout):
+        for index in tqdm(range(0, coords.shape[0], batch_size), desc='Decompressing', leave=False, dynamic_ncols=True):
             input = coords[index:index+batch_size]
             self.predict_dfs(self.base_node, index, batch_size, input)
         self.merge()

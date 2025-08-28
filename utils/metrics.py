@@ -67,7 +67,7 @@ def eval_performance(orig_data, decompressed_data):
         ssim_value = ssim_calc(data1, data2, max_range)
     elif len(orig_data.shape) == 4:
         ssim_value_total = 0 
-        for i in tqdm(range(orig_data.shape[0]), desc='Evaluating', leave=False, file=sys.stdout):
+        for i in tqdm(range(orig_data.shape[0]), desc='Evaluating', leave=False, dynamic_ncols=True):
             data1 = copy.deepcopy(orig_data[i])
             data2 = copy.deepcopy(decompressed_data[i])
             data1 = rearrange(data1, 'h w (n c) -> n c h w', n=1)

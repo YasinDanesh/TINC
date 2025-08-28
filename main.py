@@ -35,7 +35,7 @@ class CompressFramework:
         optimizer = tree_mlp.optimizer
         lr_scheduler = tree_mlp.lr_scheduler
         metrics = {'psnr_best':0, 'psnr_epoch':0, 'ssim_best':0, 'ssim_epoch':0, 'acc200_best':0, 'acc200_epoch':0, 'acc500_best':0, 'acc500_epoch':0}
-        pbar = tqdm(sampler, desc='Training', leave=True, file=sys.stdout)
+        pbar = tqdm(sampler, desc='Training', leave=True, dynamic_ncols=True)
         for step, (sampled_idxs, sampled_coords) in enumerate(pbar): 
             optimizer.zero_grad()
             loss = tree_mlp.cal_loss(sampled_idxs, sampled_coords)
