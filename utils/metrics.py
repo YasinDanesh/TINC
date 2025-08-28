@@ -6,10 +6,7 @@ from omegaconf import OmegaConf
 import torch
 import json
 import sys
-try:
-    from tqdm.auto import tqdm   # picks the right backend for terminals/notebooks
-except Exception:
-    from tqdm import tqdm
+from tqdm import tqdm
 from einops import rearrange, repeat
 from utils.ssim import ssim as ssim_calc
 from utils.ssim import ms_ssim as ms_ssim_calc
@@ -70,12 +67,17 @@ def eval_performance(orig_data, decompressed_data):
         ssim_value = ssim_calc(data1, data2, max_range)
     elif len(orig_data.shape) == 4:
         ssim_value_total = 0 
-        for i in tqdm(range(orig_data.shape[0]), desc='Evaluating', leave=False, dynamic_ncols=True):
+        pbar = tqdm(total=int(orig_data.shape[0]),
+            desc='Evaluating',
+            position=0, leave=False, file=sys.stdout)
+        for i in range(orig_data.shape[0]):
             data1 = copy.deepcopy(orig_data[i])
             data2 = copy.deepcopy(decompressed_data[i])
             data1 = rearrange(data1, 'h w (n c) -> n c h w', n=1)
             data2 = rearrange(data2, 'h w (n c) -> n c h w', n=1)
             ssim_value_total += ssim_calc(data1, data2, max_range)
+            pbar.update(1)
+        pbar.close()
         ssim_value = ssim_value_total/orig_data.shape[0]
     else:
         raise ValueError

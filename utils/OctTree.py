@@ -5,10 +5,7 @@ import os
 from einops import rearrange
 import sys
 import math
-try:
-    from tqdm.auto import tqdm   # picks the right backend for terminals/notebooks
-except Exception:
-    from tqdm import tqdm
+from tqdm import tqdm
 import torch.nn.functional as F
 from utils.tool import read_img, save_img
 from utils.Sampler import create_optim, create_flattened_coords, PointSampler, create_lr_scheduler
@@ -373,9 +370,14 @@ class OctTreeMLP(nn.Module):
         self.move2device(device=device)
         coords = self.sampler.coords.to(device)
         # for index in range(0, coords.shape[0], batch_size):
-        for index in tqdm(range(0, coords.shape[0], batch_size), desc='Decompressing', leave=False, dynamic_ncols=True):
+        pbar = tqdm(total=int(coords.shape[0]),
+            desc='Decompressing',
+            position=0, leave=False, file=sys.stdout)
+        for index in range(0, coords.shape[0], batch_size):
             input = coords[index:index+batch_size]
             self.predict_dfs(self.base_node, index, batch_size, input)
+            pbar.update(int(min(batch_size, coords.shape[0] - index)))
+        pbar.close()
         self.merge()
         # self.predict_data = self.predict_data.detach().numpy()
         # self.predict_data = self.predict_data.clip(self.side_info['scale_min'], self.side_info['scale_max'])
