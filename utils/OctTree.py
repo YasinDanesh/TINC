@@ -14,13 +14,28 @@ import json
 
 #addd
 def _fit_affine(y_pred, y_true, sample=None):
-    """Least-squares fit y_true ≈ a*y_pred + b. Both arrays in the SAME (normalized) scale."""
-    p = y_pred.reshape(-1).astype(np.float64)
-    g = y_true.reshape(-1).astype(np.float64)
+    """Least-squares fit y_true ≈ a*y_pred + b. Works with numpy arrays or torch tensors."""
+    # convert both to numpy
+    if isinstance(y_pred, torch.Tensor):
+        p = y_pred.detach().cpu().numpy()
+    else:
+        p = np.asarray(y_pred)
+    if isinstance(y_true, torch.Tensor):
+        g = y_true.detach().cpu().numpy()
+    else:
+        g = np.asarray(y_true)
+
+    # flatten + cast
+    p = p.reshape(-1).astype(np.float64, copy=False)
+    g = g.reshape(-1).astype(np.float64, copy=False)
+
+    # optional sampling
     if sample and sample < p.size:
         rng = np.random.default_rng(42)
         idx = rng.choice(p.size, size=sample, replace=False)
         p = p[idx]; g = g[idx]
+
+    # OLS solve
     X = np.vstack([p, np.ones_like(p)]).T
     a, b = np.linalg.lstsq(X, g, rcond=None)[0]
     return float(a), float(b)
