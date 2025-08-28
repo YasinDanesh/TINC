@@ -1,7 +1,10 @@
 import os
 import shutil
 import sys
-from tqdm import tqdm
+try:
+    from tqdm.auto import tqdm   # picks the right backend for terminals/notebooks
+except Exception:
+    from tqdm import tqdm
 import argparse
 import time
 import math

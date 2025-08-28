@@ -6,7 +6,10 @@ from omegaconf import OmegaConf
 import torch
 import json
 import sys
-from tqdm import tqdm
+try:
+    from tqdm.auto import tqdm   # picks the right backend for terminals/notebooks
+except Exception:
+    from tqdm import tqdm
 from einops import rearrange, repeat
 from utils.ssim import ssim as ssim_calc
 from utils.ssim import ms_ssim as ms_ssim_calc

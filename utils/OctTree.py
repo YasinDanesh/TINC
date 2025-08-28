@@ -5,7 +5,10 @@ import os
 from einops import rearrange
 import sys
 import math
-from tqdm import tqdm
+try:
+    from tqdm.auto import tqdm   # picks the right backend for terminals/notebooks
+except Exception:
+    from tqdm import tqdm
 import torch.nn.functional as F
 from utils.tool import read_img, save_img
 from utils.Sampler import create_optim, create_flattened_coords, PointSampler, create_lr_scheduler
