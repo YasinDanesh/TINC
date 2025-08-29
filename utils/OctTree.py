@@ -368,22 +368,33 @@ class OctTreeMLP(nn.Module):
     def predict(self, device:str='cpu', batch_size:int=128, apply_calibration:bool=True, denorm:bool=True):
         self.predict_data = np.zeros_like(self.data)
         self.move2device(device=device)
+        # BEGIN
+        for node in self.node_list:
+            node.net.net.eval()
         coords = self.sampler.coords.to(device)
-        # for index in range(0, coords.shape[0], batch_size):
-        pbar = tqdm(total=int(coords.shape[0]),
-            desc='Decompressing',
-            position=0, leave=False, file=sys.stdout)
-        for index in range(0, coords.shape[0], batch_size):
-            input = coords[index:index+batch_size]
-            self.predict_dfs(self.base_node, index, batch_size, input)
-            pbar.update(int(min(batch_size, coords.shape[0] - index)))
-        pbar.close()
+        with torch.no_grad():
+            # for index in range(0, coords.shape[0], batch_size):
+            pbar = tqdm(total=int(coords.shape[0]),
+                desc='Decompressing',
+                position=0, leave=False, file=sys.stdout)
+            for index in range(0, coords.shape[0], batch_size):
+                input = coords[index:index+batch_size]
+                self.predict_dfs(self.base_node, index, batch_size, input)
+                pbar.update(int(min(batch_size, coords.shape[0] - index)))
+                pbar.close()
+        # END
         self.merge()
         # self.predict_data = self.predict_data.detach().numpy()
         # self.predict_data = self.predict_data.clip(self.side_info['scale_min'], self.side_info['scale_max'])
         #self.predict_data = invnormalize_data(self.predict_data, **self.side_info)
         #addd
         # === BEGIN: calibration (use saved per-leaf/global if present; else fit once if GT is around) ===
+        self._last_pred_norm = np.array(self.predict_data, copy=True)
+        if hasattr(self, "data") and (self.data is not None):
+            self._last_gt_norm = self.data.detach().cpu().numpy()
+        else:
+            self._last_gt_norm = None
+            
         if apply_calibration:
             calib_applied = False
             model_dir = getattr(self, "model_dir", None)  # set in ModelSave.load_tree_models
@@ -441,8 +452,7 @@ class OctTreeMLP(nn.Module):
         self.move2device(device=self.device)
         return self.predict_data
         #adddd
-        self.move2device(device=self.device)
-        return self.predict_data
+
     def predict_dfs(self, node, index, batch_size, input):
         if len(node.children) > 0:
             input = node.net(input)

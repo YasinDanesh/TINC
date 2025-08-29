@@ -18,6 +18,50 @@ def _jsonable(o):
     if isinstance(o, _np.dtype):
         return str(o)
     return o
+
+def write_calibration(tree_mlp: OctTreeMLP, model_dir: str, pred_norm=None, gt_norm=None):
+    """
+    Write calib_global.json and (if 3+ levels) calib_leaves.npz using
+    a precomputed normalized prediction and ground-truth.
+    Never calls predict(); returns silently if data is missing.
+    """
+    try:
+        # prefer explicitly provided arrays
+        if pred_norm is None:
+            pred_norm = getattr(tree_mlp, "_last_pred_norm", None)
+        if gt_norm is None:
+            gt_norm = getattr(tree_mlp, "_last_gt_norm", None)
+
+        if pred_norm is None or gt_norm is None:
+            return  # nothing to do; do NOT decode here
+
+        # global (a,b)
+        a, b = _fit_affine(pred_norm, gt_norm, sample=min(200_000, pred_norm.size))
+        with open(os.path.join(model_dir, "calib_global.json"), "w") as f:
+            json.dump({"a": float(a), "b": float(b)}, f)
+
+        # per-leaf for 3+ levels
+        num_levels = len(tree_mlp.opt.Network.level_info)
+        if num_levels >= 3:
+            boxes = _tile_boxes(pred_norm.shape, num_levels=num_levels)
+            d = 2 ** (num_levels - 1)
+            A = np.zeros((d, d, d), dtype=np.float32)
+            B = np.zeros((d, d, d), dtype=np.float32)
+            idx = 0
+            for zi in range(d):
+                for yi in range(d):
+                    for xi in range(d):
+                        z0,z1,y0,y1,x0,x1 = boxes[idx]; idx += 1
+                        p = pred_norm[z0:z1, y0:y1, x0:x1, 0]
+                        g = gt_norm  [z0:z1, y0:y1, x0:x1, 0]
+                        a_, b_ = _fit_affine(p, g, sample=None)
+                        A[zi,yi,xi] = a_
+                        B[zi,yi,xi] = b_
+            np.savez_compressed(os.path.join(model_dir, "calib_leaves.npz"), a=A, b=B)
+    except Exception:
+        # don't fail the save on calibration problems
+        pass
+
 #adddd
 def save_model(model:MLP, model_path:str):
     if not os.path.exists(model_path):
@@ -140,44 +184,6 @@ def save_tree_models(tree_mlp:OctTreeMLP, model_dir:str):
     with open(os.path.join(model_dir, "norm_stats.json"), "w") as f:
         json.dump(stats, f)
 
-    # === BEGIN: write calibration files (global for 2-level; per-leaf for 3+ levels) ===
-    try:
-        # Get a normalized prediction WITHOUT calibration and WITHOUT denorm
-        pred_norm = tree_mlp.predict(device='cpu', batch_size=131072, apply_calibration=False, denorm=False)
-        if isinstance(pred_norm, torch.Tensor):
-            pred_norm = pred_norm.detach().cpu().numpy()
-
-        # Ground-truth in normalized space (available at encode/train time)
-        gt_norm = tree_mlp.data.detach().cpu().numpy() if hasattr(tree_mlp, "data") and (tree_mlp.data is not None) else None
-
-        if gt_norm is not None:
-            # Global (a,b) — tiny file, always useful
-            a, b = _fit_affine(pred_norm, gt_norm, sample=min(200_000, pred_norm.size))
-            with open(os.path.join(model_dir, "calib_global.json"), "w") as f:
-                json.dump({"a": float(a), "b": float(b)}, f)
-
-            # Per-leaf (a_ijk, b_ijk) if there are 3+ levels (64+ leaves)
-            num_levels = len(tree_mlp.opt.Network.level_info)
-            if num_levels >= 3:
-                boxes = _tile_boxes(pred_norm.shape, num_levels=num_levels)
-                d = 2 ** (num_levels - 1)
-                A = np.zeros((d, d, d), dtype=np.float32)
-                B = np.zeros((d, d, d), dtype=np.float32)
-                idx = 0
-                for zi in range(d):
-                    for yi in range(d):
-                        for xi in range(d):
-                            z0,z1,y0,y1,x0,x1 = boxes[idx]; idx += 1
-                            p = pred_norm[z0:z1, y0:y1, x0:x1, 0]
-                            g = gt_norm  [z0:z1, y0:y1, x0:x1, 0]
-                            a_, b_ = _fit_affine(p, g, sample=None)
-                            A[zi,yi,xi] = a_
-                            B[zi,yi,xi] = b_
-                np.savez_compressed(os.path.join(model_dir, "calib_leaves.npz"), a=A, b=B)
-    except Exception:
-        # don't break saving if calibration fails
-        pass
-    # === END: write calibration files ===
     #adddd
     opt_path = os.path.join(model_dir, 'opt.yaml')
     OmegaConf.save(tree_mlp.opt, opt_path)
