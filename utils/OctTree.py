@@ -372,16 +372,18 @@ class OctTreeMLP(nn.Module):
         for node in self.node_list:
             node.net.net.eval()
         coords = self.sampler.coords.to(device)
+
         with torch.no_grad():
-            # for index in range(0, coords.shape[0], batch_size):
-            pbar = tqdm(total=int(coords.shape[0]),
-                desc='Decompressing',
-                position=0, leave=False, file=sys.stdout)
-            for index in range(0, coords.shape[0], batch_size):
-                input = coords[index:index+batch_size]
-                self.predict_dfs(self.base_node, index, batch_size, input)
-                pbar.update(int(min(batch_size, coords.shape[0] - index)))
-                pbar.close()
+            total = int(coords.shape[0])
+            with tqdm(total=total,
+                    desc='Decompressing',
+                    position=1,          # avoid colliding with the training bar
+                    leave=False,
+                    file=sys.stdout) as pbar:
+                for index in range(0, total, batch_size):
+                    inp = coords[index:index+batch_size]
+                    self.predict_dfs(self.base_node, index, batch_size, inp)
+                    pbar.update(min(batch_size, total - index))
         # END
         self.merge()
         # self.predict_data = self.predict_data.detach().numpy()

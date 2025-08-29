@@ -49,37 +49,39 @@ def cal_psnr(data_gt: np.ndarray, data_hat: np.ndarray, data_range):
 #adddd
 
 def eval_performance(orig_data, decompressed_data):
+    # --- defaults ---
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    batch_size = 8
+    bar_position = 2
+
+    # --- accuracy & PSNR (numpy) ---
     max_range = get_type_max(orig_data)
-    orig_data = orig_data.astype(np.float32)
-    decompressed_data = decompressed_data.astype(np.float32)
-    # accuracy
-    acc200 = cal_iou_acc_pre(orig_data, decompressed_data, thres=200)[1]
-    acc500 = cal_iou_acc_pre(orig_data, decompressed_data, thres=500)[1]
-    # psnr
-    psnr_value = cal_psnr(orig_data, decompressed_data, max_range)
-    # ssim
-    orig_data = torch.from_numpy(orig_data)
-    decompressed_data = torch.from_numpy(decompressed_data)
-    # convert to NCHW or NCDHW
-    if len(orig_data.shape) == 3:
-        data1 = rearrange(orig_data, 'h w (n c) -> n c h w', n=1)
-        data2 = rearrange(decompressed_data, 'h w (n c) -> n c h w', n=1)
-        ssim_value = ssim_calc(data1, data2, max_range)
-    elif len(orig_data.shape) == 4:
-        ssim_value_total = 0 
-        pbar = tqdm(total=int(orig_data.shape[0]),
-            desc='Evaluating',
-            position=0, leave=False, file=sys.stdout)
-        for i in range(orig_data.shape[0]):
-            data1 = copy.deepcopy(orig_data[i])
-            data2 = copy.deepcopy(decompressed_data[i])
-            data1 = rearrange(data1, 'h w (n c) -> n c h w', n=1)
-            data2 = rearrange(data2, 'h w (n c) -> n c h w', n=1)
-            ssim_value_total += ssim_calc(data1, data2, max_range)
-            pbar.update(1)
-        pbar.close()
-        ssim_value = ssim_value_total/orig_data.shape[0]
-    else:
-        raise ValueError
-    
+    orig_np   = orig_data.astype(np.float32, copy=False)
+    decomp_np = decompressed_data.astype(np.float32, copy=False)
+
+    acc200 = cal_iou_acc_pre(orig_np, decomp_np, thres=200)[1]
+    acc500 = cal_iou_acc_pre(orig_np, decomp_np, thres=500)[1]
+    psnr_value = cal_psnr(orig_np, decomp_np, max_range)
+
+    # --- SSIM (batched) ---
+    with torch.no_grad():
+        if orig_np.ndim == 3:
+            X = torch.from_numpy(rearrange(orig_np,   'h w (n c) -> n c h w', n=1)).to(device=device, dtype=torch.float32)
+            Y = torch.from_numpy(rearrange(decomp_np, 'h w (n c) -> n c h w', n=1)).to(device=device, dtype=torch.float32)
+            ssim_value = float(ssim_calc(X, Y, data_range=max_range, size_average=True))
+        elif orig_np.ndim == 4:
+            Z = orig_np.shape[0]
+            ssim_sum = 0.0
+            with tqdm(total=Z, desc='Evaluating', position=bar_position, leave=False, file=sys.stdout) as pbar:
+                for start in range(0, Z, batch_size):
+                    end = min(start + batch_size, Z)
+                    Xb = torch.from_numpy(rearrange(orig_np[start:end],   '(n) h w c -> n c h w')).to(device=device, dtype=torch.float32)
+                    Yb = torch.from_numpy(rearrange(decomp_np[start:end], '(n) h w c -> n c h w')).to(device=device, dtype=torch.float32)
+                    chunk = ssim_calc(Xb, Yb, data_range=max_range, size_average=True)  # scalar over this mini-batch
+                    ssim_sum += float(chunk) * (end - start)
+                    pbar.update(end - start)
+            ssim_value = ssim_sum / Z
+        else:
+            raise ValueError(f'Unexpected shapes: {orig_np.shape} vs {decomp_np.shape}')
+
     return psnr_value, float(ssim_value), acc200, acc500
