@@ -377,7 +377,8 @@ class OctTreeMLP(nn.Module):
             total = int(coords.shape[0])
             with tqdm(total=total,
                     desc='Decompressing',
-                    position=1,          # avoid colliding with the training bar
+                    position=0,
+                    dynamic_ncols=True,
                     leave=False,
                     file=sys.stdout) as pbar:
                 for index in range(0, total, batch_size):

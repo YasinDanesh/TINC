@@ -52,7 +52,6 @@ def eval_performance(orig_data, decompressed_data):
     # --- defaults ---
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     batch_size = 8
-    bar_position = 2
 
     # --- accuracy & PSNR (numpy) ---
     max_range = get_type_max(orig_data)
@@ -72,7 +71,7 @@ def eval_performance(orig_data, decompressed_data):
         elif orig_np.ndim == 4:
             Z = orig_np.shape[0]
             ssim_sum = 0.0
-            with tqdm(total=Z, desc='Evaluating', position=bar_position, leave=False, file=sys.stdout) as pbar:
+            with tqdm(total=Z, desc='Evaluating', position=0, leave=False, dynamic_ncols=True, file=sys.stdout) as pbar:
                 for start in range(0, Z, batch_size):
                     end = min(start + batch_size, Z)
                     Xb = torch.from_numpy(rearrange(orig_np[start:end],   '(n) h w c -> n c h w')).to(device=device, dtype=torch.float32)
