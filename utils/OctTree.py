@@ -75,9 +75,9 @@ class Node():
         self.data = origin_data[self.d1:self.d2, self.h1:self.h2, self.w1:self.w2]
         self.data = rearrange(self.data, 'd h w n-> (d h w) n')
         self.children = []
-        self.predict_data = np.zeros_like(self.data)
-        self.aoi = float((self.data>0).sum())
-        self.var = float(((self.data-self.data.mean())**2).mean())
+        self.predict_data = torch.zeros_like(self.data, device=self.data.device)
+        self.aoi = float((self.data > 0).sum().item())
+        self.var = float((((self.data - self.data.mean()) ** 2).mean()).item())
     
     def get_children(self):
         for d in range(2):
@@ -369,8 +369,10 @@ class OctTreeMLP(nn.Module):
     """predict in batches"""
     #def predict(self, device:str='cpu', batch_size:int=128):
     def predict(self, device:str='cpu', batch_size:int=128, apply_calibration:bool=True, denorm:bool=True):
-        self.predict_data = np.zeros_like(self.data)
+        # allocate output on the compute device as torch tensor
+        self.predict_data = torch.zeros_like(self.data, device=device)
         self.move2device(device=device)
+
         # BEGIN
         for node in self.node_list:
             node.net.net.eval()
@@ -390,12 +392,19 @@ class OctTreeMLP(nn.Module):
                     pbar.update(min(batch_size, total - index))
         # END
         self.merge()
-        # self.predict_data = self.predict_data.detach().numpy()
-        # self.predict_data = self.predict_data.clip(self.side_info['scale_min'], self.side_info['scale_max'])
-        #self.predict_data = invnormalize_data(self.predict_data, **self.side_info)
         #addd
+        # ---- convert once to NumPy for calibration / denorm, and cache normalized prediction ----
+        pred_norm_np = pd.detach().cpu().numpy()
+        self._last_pred_norm = np.array(pred_norm_np, copy=True)
+        if hasattr(self, "data") and (self.data is not None):
+            self._last_gt_norm = self.data.detach().cpu().numpy()
+        else:
+            self._last_gt_norm = None
+        # -----------------------------------------------------------
+
         # === BEGIN: calibration (use saved per-leaf/global if present; else fit once if GT is around) ===
-        self._last_pred_norm = np.array(self.predict_data, copy=True)
+        pd = pred_norm_np
+        self._last_pred_norm = np.array(pd, copy=True)
         if hasattr(self, "data") and (self.data is not None):
             self._last_gt_norm = self.data.detach().cpu().numpy()
         else:
@@ -414,21 +423,21 @@ class OctTreeMLP(nn.Module):
                         arr = np.load(leaf_npz)
                         A = arr["a"].astype(np.float32)
                         B = arr["b"].astype(np.float32)
-                        boxes = _tile_boxes(self.predict_data.shape, num_levels=len(self.opt.Network.level_info))
+                        boxes = _tile_boxes(pd.shape, num_levels=len(self.opt.Network.level_info))
                         d = A.shape
                         idx = 0
                         for zi in range(d[0]):
                             for yi in range(d[1]):
                                 for xi in range(d[2]):
                                     z0,z1,y0,y1,x0,x1 = boxes[idx]; idx += 1
-                                    self.predict_data[z0:z1, y0:y1, x0:x1, 0] = \
-                                        A[zi,yi,xi] * self.predict_data[z0:z1, y0:y1, x0:x1, 0] + B[zi,yi,xi]
+                                    pd[z0:z1, y0:y1, x0:x1, 0] = \
+                                        A[zi,yi,xi] * pd[z0:z1, y0:y1, x0:x1, 0] + B[zi,yi,xi]
                         calib_applied = True
                     elif os.path.exists(glob_json):
                         with open(glob_json, "r") as f:
                             dct = json.load(f)
                         a = float(dct.get("a", 1.0)); b = float(dct.get("b", 0.0))
-                        self.predict_data = a * self.predict_data + b
+                        pd = a * pd + b
                         calib_applied = True
             except Exception:
                 # don't fail decode if files are missing/invalid
@@ -436,9 +445,9 @@ class OctTreeMLP(nn.Module):
 
             # 2) Fallback during train/eval: fit a single (a,b) if GT in normalized space is available.
             if (not calib_applied) and getattr(self, "has_gt", False) and (self.data is not None):
-                a, b = _fit_affine(self.predict_data, self.data, sample=200_000)
+                a, b = _fit_affine(pd, self.data, sample=200_000)
                 # sanity clamp; only apply if it helps
-                p = self.predict_data.reshape(-1).astype(np.float64)
+                p = pd.reshape(-1).astype(np.float64)
                 g = self.data.detach().cpu().numpy().reshape(-1).astype(np.float64)
                 n = min(200_000, p.size)
                 rng = np.random.default_rng(42)
@@ -447,15 +456,16 @@ class OctTreeMLP(nn.Module):
                 mse_before = np.mean((p[idx] - g[idx])**2)
                 mse_after  = np.mean((a*p[idx] + b - g[idx])**2)
                 if mse_after < mse_before:
-                    self.predict_data = (a * self.predict_data + b).astype(np.float32)
+                    pd = (a * pd + b).astype(np.float32)
         # === END: calibration ===
 
         # Denormalize if requested
         if denorm:
-            self.predict_data = self.predict_data.clip(self.side_info['scale_min'], self.side_info['scale_max'])
-            self.predict_data = invnormalize_data(self.predict_data, **self.side_info)
+            pd = pd.clip(self.side_info['scale_min'], self.side_info['scale_max'])
+            pd = invnormalize_data(pd, **self.side_info)
 
         self.move2device(device=self.device)
+        self.predict_data = pd
         return self.predict_data
         #adddd
 
@@ -466,7 +476,9 @@ class OctTreeMLP(nn.Module):
             for child in children:
                 self.predict_dfs(child, index, batch_size, input)
         else:
-            node.predict_data[index:index+batch_size] = node.net(input).detach().cpu().numpy()
+            with torch.no_grad():
+                node.predict_data[index:index+batch_size] = node.net(input).detach()
+
     def merge(self):
         for node in self.leaf_node_list:
             chunk = node.predict_data
