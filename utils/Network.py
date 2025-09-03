@@ -20,7 +20,13 @@ class Sine(nn.Module):
         self.w0 = w0
 
     def forward(self, input):
-        return torch.sin(self.w0*input)
+        # If autocast is active (on newer GPUs), do sin in fp32 to avoid cast churn
+        if torch.is_autocast_enabled():
+            x = input.float()
+            y = torch.sin(self.w0 * x)
+            return y.to(dtype=input.dtype)
+        else:
+            return torch.sin(self.w0 * input)
 
 def ActInit(net, act):
     if act == 'Sine':

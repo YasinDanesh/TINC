@@ -199,7 +199,12 @@ class OctTreeMLP(nn.Module):
         self.sampler = self.init_sampler()
         self.optimizer = self.init_optimizer()
         self.lr_scheduler = self.init_lr_scheduler()
-        self.scaler = torch.cuda.amp.GradScaler(enabled=(self.device == 'cuda'))
+        if self.device == 'cuda' and torch.cuda.is_available():
+            major_cc = torch.cuda.get_device_capability()[0]
+        else:
+            major_cc = 0
+        self.use_amp = (self.device == 'cuda' and major_cc >= 7)  # enable only on Volta+ (7.x) and newer
+        self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
 
 
     """init tree structure"""
@@ -322,8 +327,10 @@ class OctTreeMLP(nn.Module):
     def init_optimizer(self):
         name = self.opt.Train.optimizer.type
         lr = self.opt.Train.optimizer.lr
-        parameters = [{'params':node.net.net.parameters()} for node in self.node_list]
-        self.optimizer = create_optim(name, parameters ,lr)
+        all_params = []
+        for node in self.node_list:
+            all_params += list(p for p in node.net.net.parameters())
+        self.optimizer = create_optim(name, all_params, lr)
         return self.optimizer
     
     def init_lr_scheduler(self):
@@ -394,7 +401,7 @@ class OctTreeMLP(nn.Module):
         self.merge()
         #addd
         # ---- convert once to NumPy for calibration / denorm, and cache normalized prediction ----
-        pred_norm_np = pd.detach().cpu().numpy()
+        pred_norm_np = self.predict_data.detach().cpu().numpy()
         self._last_pred_norm = np.array(pred_norm_np, copy=True)
         if hasattr(self, "data") and (self.data is not None):
             self._last_gt_norm = self.data.detach().cpu().numpy()
@@ -499,7 +506,7 @@ class OctTreeMLP(nn.Module):
         self.loss = 0
         use_cuda = (self.device == 'cuda')
         # P100: bfloat16 not supported; use float16 for AMP
-        with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=use_cuda):
+        with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=self.use_amp):
             self.forward_dfs(self.base_node, idxs, coords)
             self.loss = self.loss.mean()
         return self.loss

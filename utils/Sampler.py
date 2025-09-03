@@ -4,16 +4,21 @@ from typing import Tuple
 import copy
 import math
 
-def create_optim(name, parameters ,lr):
+def create_optim(name, parameters, lr):
     if name == 'Adam':
-        optimizer = torch.optim.Adam(parameters, lr=lr)
+        return torch.optim.Adam(parameters, lr=lr)
     elif name == 'Adamax':
-        optimizer = torch.optim.Adamax(parameters, lr=lr)
+        return torch.optim.Adamax(parameters, lr=lr)
+    elif name == 'AdamW':
+        # Fused AdamW may not be available on P100; try and fall back.
+        try:
+            return torch.optim.AdamW(parameters, lr=lr, fused=True)
+        except TypeError:
+            return torch.optim.AdamW(parameters, lr=lr)
     elif name == 'SGD':
-        optimizer = torch.optim.SGD(parameters, lr=lr)
+        return torch.optim.SGD(parameters, lr=lr)
     else:
         raise NotImplemented
-    return optimizer
 
 def create_lr_scheduler(optimizer, lr_scheduler_opt):
     lr_scheduler_opt = copy.deepcopy(lr_scheduler_opt)
