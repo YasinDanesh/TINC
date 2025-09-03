@@ -70,11 +70,23 @@ class MyLogger():
                 self.logger_dict[logger_name].close()
 
 def reproduc(opt):
-    """Make experiments reproducible
-    """
+    """Make experiments reproducible + enable fast matmuls when possible."""
     random.seed(opt['seed'])
     np.random.seed(opt['seed'])
     torch.manual_seed(opt['seed'])
     torch.cuda.manual_seed_all(opt['seed'])
+
     torch.backends.cudnn.benchmark = opt['benchmark']
     torch.backends.cudnn.deterministic = opt['deterministic']
+
+    # P100 has no TF32/bfloat16; these calls are harmless but won't change kernels.
+    try:
+        torch.backends.cuda.matmul.allow_tf32 = False  # TF32 not available on P100
+        torch.backends.cudnn.allow_tf32 = False
+    except Exception:
+        pass
+    try:
+        # Still lets PyTorch pick better kernels where possible.
+        torch.set_float32_matmul_precision("high")
+    except Exception:
+        pass

@@ -34,16 +34,16 @@ def create_lr_scheduler(optimizer, lr_scheduler_opt):
         raise NotImplementedError
     return lr_scheduler
 
-def create_flattened_coords(coords_shape:Tuple) -> torch.Tensor:
+def create_flattened_coords(coords_shape: Tuple, device: str = 'cpu') -> torch.Tensor:
     minimum = -1
     maximum = 1
-    coords = torch.stack(torch.meshgrid(
-        torch.linspace(minimum, maximum, coords_shape[0]),
-        torch.linspace(minimum, maximum, coords_shape[1]),
-        torch.linspace(minimum, maximum, coords_shape[2]), indexing='ij'),
-    axis=-1)
-    flattened_coords = rearrange(coords,'d h w c -> (d h w) c')
+    linz = torch.linspace(minimum, maximum, coords_shape[0], device=device)
+    liny = torch.linspace(minimum, maximum, coords_shape[1], device=device)
+    linx = torch.linspace(minimum, maximum, coords_shape[2], device=device)
+    coords = torch.stack(torch.meshgrid(linz, liny, linx, indexing='ij'), axis=-1)
+    flattened_coords = rearrange(coords, 'd h w c -> (d h w) c')
     return flattened_coords
+
 class PointSampler:
     def __init__(self, data: torch.Tensor, max_level:int, batch_size: int, epochs:int, device:str='cpu') -> None:
         self.batch_size = int(batch_size/8**max_level)
@@ -53,7 +53,7 @@ class PointSampler:
         self.device = device
         assert data.shape[0]%2**max_level==0 and data.shape[1]%2**max_level==0 and data.shape[1]%2**max_level==0, f"{data.shape} can't be devided by 2^{max_level}"
         self.shape = (data.shape[0]//2**max_level, data.shape[1]//2**max_level, data.shape[2]//2**max_level)
-        self.coords = create_flattened_coords(self.shape).to(device)
+        self.coords = create_flattened_coords(self.shape, device=device)
         self.pop_size = self.shape[0]*self.shape[1]*self.shape[2]
         self.evaled_epochs = []
     
@@ -78,9 +78,8 @@ class PointSampler:
     def __next__(self):
         if self.index < self.pop_size:
             # sampled_idxs = self.index
-            sampled_idxs = torch.randint(0, self.pop_size, (self.batch_size,))
-            sampled_coords = self.coords[sampled_idxs, :]
-            sampled_coords = sampled_coords.to(self.device)
+            sampled_idxs = torch.randint(0, self.pop_size, (self.batch_size,), device=self.device)
+            sampled_coords = self.coords.index_select(0, sampled_idxs)  # stays on device
             self.index += self.batch_size
             return sampled_idxs, sampled_coords
         elif self.epochs_count < self.epochs-1:

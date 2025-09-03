@@ -172,6 +172,7 @@ class OctTreeMLP(nn.Module):
                 opt.Preprocess.normal_min,
                 opt.Preprocess.normal_max
             )
+            self.data = self.data.to(self.device, non_blocking=True).contiguous()
         else:
             # DECODE (no-reference): don't read GT
             if origin_shape is None:
@@ -198,6 +199,8 @@ class OctTreeMLP(nn.Module):
         self.sampler = self.init_sampler()
         self.optimizer = self.init_optimizer()
         self.lr_scheduler = self.init_lr_scheduler()
+        self.scaler = torch.cuda.amp.GradScaler(enabled=(self.device == 'cuda'))
+
 
     """init tree structure"""
     def init_tree(self):
@@ -482,9 +485,13 @@ class OctTreeMLP(nn.Module):
         
     def cal_loss(self, idxs, coords):
         self.loss = 0
-        self.forward_dfs(self.base_node, idxs, coords)
-        self.loss = self.loss.mean()
+        use_cuda = (self.device == 'cuda')
+        # P100: bfloat16 not supported; use float16 for AMP
+        with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=use_cuda):
+            self.forward_dfs(self.base_node, idxs, coords)
+            self.loss = self.loss.mean()
         return self.loss
+
     def forward_dfs(self, node, idxs, input):
         if len(node.children) > 0:
             input = node.net(input)

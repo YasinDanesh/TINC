@@ -38,11 +38,19 @@ class CompressFramework:
         metrics = {'psnr_best':0, 'psnr_epoch':0, 'ssim_best':0, 'ssim_epoch':0, 'acc200_best':0, 'acc200_epoch':0, 'acc500_best':0, 'acc500_epoch':0}
         pbar = tqdm(sampler, desc='Training', leave=True, dynamic_ncols=True, file=sys.stdout)
         for step, (sampled_idxs, sampled_coords) in enumerate(pbar): 
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
             loss = tree_mlp.cal_loss(sampled_idxs, sampled_coords)
-            loss.backward()
-            optimizer.step()
+
+            if tree_mlp.device == 'cuda':
+                tree_mlp.scaler.scale(loss).backward()
+                tree_mlp.scaler.step(optimizer)
+                tree_mlp.scaler.update()
+            else:
+                loss.backward()
+                optimizer.step()
+
             lr_scheduler.step()
+
             pbar.set_postfix_str("loss={:.6f}".format(loss.item()))
             pbar.update(1)
             if sampler.judge_eval(self.compress_opt.Eval.epochs):
