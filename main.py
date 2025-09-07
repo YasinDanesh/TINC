@@ -106,7 +106,13 @@ def main():
     shutil.copy(args.p, Log.script_dir)
     shutil.copy(__file__, Log.script_dir)
     reproduc(opt["Reproduc"])
-
+    # import torch
+    # # P100 run: keep a few CPU threads, avoids oversubscription noise
+    # try:
+    #     torch.set_num_threads(5)
+    #     torch.set_num_interop_threads(5)
+    # except Exception:
+    #     print("fuc")
     compressor = CompressFramework(opt, Log)
     compressor.compress()
 

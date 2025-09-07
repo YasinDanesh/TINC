@@ -334,6 +334,12 @@ class OctTreeMLP(nn.Module):
         return self.optimizer
     
     def init_lr_scheduler(self):
+        # Ensure T_max equals total steps (one scheduler step per training step)
+        if getattr(self.opt.Train.lr_scheduler, "name", "") == "CosineAnnealingLR":
+            try:
+                self.opt.Train.lr_scheduler.T_max = len(self.sampler)
+            except Exception:
+                pass
         self.lr_scheduler = create_lr_scheduler(self.optimizer, self.opt.Train.lr_scheduler)
         return self.lr_scheduler
     
@@ -521,7 +527,8 @@ class OctTreeMLP(nn.Module):
             predict = node.net(input)
             # label = node.data[idxs:idxs+self.sampler.batch_size, :].to(self.device)
             label = node.data[idxs, :].to(self.device)
-            self.loss = self.loss + self.l2loss(label, predict)
+            #self.loss = self.loss + self.l2loss(label, predict)
+            self.loss = self.loss + F.mse_loss(label, predict)
 
     """TODO"""
     def change_net(self):
