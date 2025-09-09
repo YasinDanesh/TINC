@@ -495,7 +495,8 @@ class OctTreeMLP(nn.Module):
             predict = node.net(input)
             # label = node.data[idxs:idxs+self.sampler.batch_size, :].to(self.device)
             label = node.data[idxs, :].to(self.device)
-            self.loss = self.loss + self.l2loss(label, predict)
+            #self.loss = self.loss + self.l2loss(label, predict)
+            self.loss = self.loss + F.mse_loss(label, predict)
 
     """TODO"""
     def change_net(self):

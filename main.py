@@ -43,8 +43,8 @@ class CompressFramework:
             loss.backward()
             optimizer.step()
             lr_scheduler.step()
-            pbar.set_postfix_str("loss={:.6f}".format(loss.item()))
-            pbar.update(1)
+            if step % 20 == 0:
+                pbar.set_postfix_str(f"loss={loss.item():.6f}")
             if sampler.judge_eval(self.compress_opt.Eval.epochs):
                 time_eval_start = time.time()
                 predict_data = tree_mlp.predict(device=self.compress_opt.Eval.device, batch_size=self.compress_opt.Eval.batch_size)
