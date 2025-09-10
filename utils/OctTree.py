@@ -191,6 +191,13 @@ class OctTreeMLP(nn.Module):
         self.has_gt = bool(load_data and self.data_path)   
 
         self.init_tree()
+        # NEW: precompute total variance per level (used by var_global)
+        self.level_var_sum = {}
+        def _accumulate_level_var(node):
+            self.level_var_sum[node.level] = self.level_var_sum.get(node.level, 0.0) + float(node.var)
+            for ch in node.children:
+                _accumulate_level_var(ch)
+        _accumulate_level_var(self.base_node)
         self.init_network()
         self.init_node_list()
         self.cal_params_total()
@@ -263,24 +270,44 @@ class OctTreeMLP(nn.Module):
             param = self.level_param[node.level]
         elif node.level < self.max_level:
             input, output, output_act = node.parent.net.hyper['output'], None, True
-            if self.level_allocate[node.level] == 'equal':
-                param = self.level_param[node.level]/8**node.level
-            elif self.level_allocate[node.level] == 'aoi':
-                param = self.level_param[node.level]*node.aoi/self.base_node.aoi
-            elif self.level_allocate[node.level] == 'var':
-                param = self.level_param[node.level]*node.var/sum([child.var for child in node.parent.children])
+            alloc = str(self.level_allocate[node.level]).lower()
+            if alloc == 'equal':
+                param = self.level_param[node.level] / 8**node.level
+            elif alloc == 'aoi':
+                param = self.level_param[node.level] * node.aoi / self.base_node.aoi
+            elif alloc == 'var':
+                # per-parent (local) variance split — corrected version
+                parents = 8**(node.level-1) if node.level > 0 else 1
+                per_parent_budget = self.level_param[node.level] / parents
+                denom = sum(child.var for child in node.parent.children) + 1e-12
+                param = per_parent_budget * (node.var / denom)
+            elif alloc == 'var_global':
+                # global variance split across ALL nodes at this level
+                denom = self.level_var_sum.get(node.level, 0.0) + 1e-12
+                param = self.level_param[node.level] * (node.var / denom)
             else:
-                param = self.level_param[node.level]/8**node.level
+                param = self.level_param[node.level] / 8**node.level
+
         else:
             input, output, output_act = node.parent.net.hyper['output'], self.opt.Network.output, False
-            if self.level_allocate[node.level] == 'equal':
-                param = self.level_param[node.level]/8**node.level
-            elif self.level_allocate[node.level] == 'aoi':
-                param = self.level_param[node.level]*node.aoi/self.base_node.aoi
-            elif self.level_allocate[node.level] == 'var':
-                param = self.level_param[node.level]*node.var/sum([child.var for child in node.parent.children])
+            alloc = str(self.level_allocate[node.level]).lower()
+            if alloc == 'equal':
+                param = self.level_param[node.level] / 8**node.level
+            elif alloc == 'aoi':
+                param = self.level_param[node.level] * node.aoi / self.base_node.aoi
+            elif alloc == 'var':
+                # per-parent (local) variance split — corrected version
+                parents = 8**(node.level-1) if node.level > 0 else 1
+                per_parent_budget = self.level_param[node.level] / parents
+                denom = sum(child.var for child in node.parent.children) + 1e-12
+                param = per_parent_budget * (node.var / denom)
+            elif alloc == 'var_global':
+                # global variance split across ALL leaves
+                denom = self.level_var_sum.get(node.level, 0.0) + 1e-12
+                param = self.level_param[node.level] * (node.var / denom)
             else:
-                param = self.level_param[node.level]/8**node.level
+                param = self.level_param[node.level] / 8**node.level
+
         hidden, output = cal_hidden_output(param=param, layer=layer, input=input, output=output)
         node.init_network(input=input, output=output, hidden=hidden, layer=layer, act=act, output_act=output_act, w0=self.opt.Network.w0)
         if not f'Level{node.level}' in self.net_structure.keys():
