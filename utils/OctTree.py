@@ -78,6 +78,7 @@ class Node():
         self.predict_data = np.zeros_like(self.data)
         self.aoi = float((self.data>0).sum())
         self.var = float(((self.data-self.data.mean())**2).mean())
+        self.res = 0.0
     
     def get_children(self):
         for d in range(2):
@@ -191,15 +192,91 @@ class OctTreeMLP(nn.Module):
         self.has_gt = bool(load_data and self.data_path)   
 
         self.init_tree()
-        # NEW: precompute total variance per level (used by var_global)
+        # Build node and leaf lists BEFORE any allocation, so we can attach residuals to leaves
+        self.node_list = []
+        self.leaf_node_list = []
+        self.tree2list_dfs(self.base_node)
+        
+        # --- variance sums per level (for var_global) ---
         self.level_var_sum = {}
-        def _accumulate_level_var(node):
-            self.level_var_sum[node.level] = self.level_var_sum.get(node.level, 0.0) + float(node.var)
-            for ch in node.children:
+        def _accumulate_level_var(n):
+            self.level_var_sum[n.level] = self.level_var_sum.get(n.level, 0.0) + float(n.var)
+            for ch in n.children:
                 _accumulate_level_var(ch)
         _accumulate_level_var(self.base_node)
-        self.init_network()
-        self.init_node_list()
+        
+        # --- residual-driven allocation setup (for res_global) ---
+        self.residual_loaded = False
+        self.level_res_sum = {}
+        self.level_res_pow_sum = {}
+        
+        # residual contrast controls
+        self.res_alpha = 1.0
+        self.res_eps   = 1e-6
+        if hasattr(self.opt, "ResAlloc"):
+            if hasattr(self.opt.ResAlloc, "alpha") and self.opt.ResAlloc.alpha is not None:
+                self.res_alpha = float(self.opt.ResAlloc.alpha)
+            if hasattr(self.opt.ResAlloc, "eps") and self.opt.ResAlloc.eps is not None:
+                self.res_eps = float(self.opt.ResAlloc.eps)
+        
+        def _load_residual_grid():
+            # 1) explicit YAML path
+            path = None
+            if hasattr(self.opt, "ResAlloc") and hasattr(self.opt.ResAlloc, "path") and self.opt.ResAlloc.path:
+                path = str(self.opt.ResAlloc.path)
+            # 2) next to model_dir (decode/fine-tune case)
+            if (path is None) and hasattr(self, "model_dir") and self.model_dir:
+                cand = os.path.join(self.model_dir, "residual_leaves.npz")
+                if os.path.exists(cand):
+                    path = cand
+            return path
+        
+        def _attach_residuals_from_grid(MSE):
+            # Fill per-leaf residuals
+            for leaf in self.leaf_node_list:
+                leaf.res = float(MSE[leaf.di, leaf.hi, leaf.wi])
+            # Sum upward
+            def _sum_up(n):
+                if n.children:
+                    n.res = 0.0
+                    for ch in n.children:
+                        _sum_up(ch)
+                        n.res += float(ch.res)
+            _sum_up(self.base_node)
+            # Level-wise sums
+            self.level_res_sum = {}
+            def _accum_level(n):
+                self.level_res_sum[n.level] = self.level_res_sum.get(n.level, 0.0) + float(n.res)
+                for ch in n.children:
+                    _accum_level(ch)
+            _accum_level(self.base_node)
+            # Powered sums for (res+eps)^alpha
+            self.level_res_pow_sum = {}
+            def _accum_pow(n):
+                val = (max(float(n.res), 0.0) + self.res_eps) ** self.res_alpha
+                self.level_res_pow_sum[n.level] = self.level_res_pow_sum.get(n.level, 0.0) + val
+                for ch in n.children:
+                    _accum_pow(ch)
+            _accum_pow(self.base_node)
+        
+        # Try to load residuals BEFORE allocating params
+        try:
+            res_path = _load_residual_grid()
+            if res_path and os.path.exists(res_path):
+                arr = np.load(res_path)
+                MSE = arr["mse"].astype(np.float64)
+                expected = 2 ** (len(self.opt.Network.level_info) - 1)  # leaves per axis
+                if MSE.shape == (expected, expected, expected):
+                    _attach_residuals_from_grid(MSE)
+                    self.residual_loaded = True
+                    print("residuals loaded before allocation")  # debug if you like
+        except Exception:
+            pass
+        
+        # Build leaves list BEFORE attaching residuals
+        self.init_network()      # creates net hyper placeholders
+        self.init_node_list()    # populates leaf_node_list, etc.
+        
         self.cal_params_total()
         self.move2device(self.device)
         self.sampler = self.init_sampler()
@@ -276,17 +353,22 @@ class OctTreeMLP(nn.Module):
             elif alloc == 'aoi':
                 param = self.level_param[node.level] * node.aoi / self.base_node.aoi
             elif alloc == 'var':
-                # per-parent (local) variance split — corrected version
+                # per-parent variance split (fixed)
                 parents = 8**(node.level-1) if node.level > 0 else 1
                 per_parent_budget = self.level_param[node.level] / parents
                 denom = sum(child.var for child in node.parent.children) + 1e-12
                 param = per_parent_budget * (node.var / denom)
             elif alloc == 'var_global':
-                # global variance split across ALL nodes at this level
                 denom = self.level_var_sum.get(node.level, 0.0) + 1e-12
                 param = self.level_param[node.level] * (node.var / denom)
+            elif alloc == 'res_global' and self.residual_loaded:
+                denom = self.level_res_sum.get(node.level, 0.0) + 1e-12
+                param = self.level_param[node.level] * (node.res / denom)
             else:
+                # fallback
+                print("fallback")
                 param = self.level_param[node.level] / 8**node.level
+
 
         else:
             input, output, output_act = node.parent.net.hyper['output'], self.opt.Network.output, False
@@ -296,16 +378,19 @@ class OctTreeMLP(nn.Module):
             elif alloc == 'aoi':
                 param = self.level_param[node.level] * node.aoi / self.base_node.aoi
             elif alloc == 'var':
-                # per-parent (local) variance split — corrected version
                 parents = 8**(node.level-1) if node.level > 0 else 1
                 per_parent_budget = self.level_param[node.level] / parents
                 denom = sum(child.var for child in node.parent.children) + 1e-12
                 param = per_parent_budget * (node.var / denom)
             elif alloc == 'var_global':
-                # global variance split across ALL leaves
                 denom = self.level_var_sum.get(node.level, 0.0) + 1e-12
                 param = self.level_param[node.level] * (node.var / denom)
+            elif alloc == 'res_global' and self.residual_loaded:
+                num = (max(float(node.res), 0.0) + self.res_eps) ** self.res_alpha
+                denom = (self.level_res_pow_sum.get(node.level, 0.0) + 1e-12)
+                param = self.level_param[node.level] * (num / denom)
             else:
+                print("fallback")
                 param = self.level_param[node.level] / 8**node.level
 
         hidden, output = cal_hidden_output(param=param, layer=layer, input=input, output=output)
