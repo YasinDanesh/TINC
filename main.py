@@ -11,7 +11,7 @@ from utils.logger import MyLogger, reproduc
 from utils.OctTree import OctTreeMLP
 from utils.tool import read_img, save_img, get_folder_size
 from utils.metrics import eval_performance
-from utils.ModelSave import save_tree_models, write_calibration
+from utils.ModelSave import save_tree_models, write_calibration, write_residuals
 
 class CompressFramework:
     def __init__(self, opt, Log) -> None:
@@ -55,7 +55,8 @@ class CompressFramework:
                     metrics['psnr_epoch'] = sampler.epochs_count
                     out_dir = os.path.join(self.Log.compressed_dir, 'models_psnr_best')
                     save_tree_models(tree_mlp=tree_mlp, model_dir=out_dir)
-                    write_calibration(tree_mlp, out_dir)  # <-- NEW: uses cached _last_pred_norm / _last_gt_norm
+                    write_calibration(tree_mlp, out_dir)
+                    write_residuals(tree_mlp, out_dir)
                     save_img(os.path.join(self.Log.decompressed_dir, 'decompressed_psnr_best.tif'), predict_data)
                 
                 if ssim > metrics['ssim_best']:
@@ -63,7 +64,8 @@ class CompressFramework:
                     metrics['ssim_epoch'] = sampler.epochs_count
                     out_dir = os.path.join(self.Log.compressed_dir, 'models_ssim_best')
                     save_tree_models(tree_mlp=tree_mlp, model_dir=out_dir)
-                    write_calibration(tree_mlp, out_dir)  # <-- NEW
+                    write_calibration(tree_mlp, out_dir)
+                    write_residuals(tree_mlp, out_dir)
                     save_img(os.path.join(self.Log.decompressed_dir, 'decompressed_ssim_best.tif'), predict_data)
                 if acc200 > metrics['acc200_best']:
                     metrics['acc200_best'] = acc200
@@ -75,7 +77,8 @@ class CompressFramework:
                 time_eval += (time.time() - time_eval_start)
         model_dir = os.path.join(self.Log.compressed_dir, 'models')
         save_tree_models(tree_mlp=tree_mlp, model_dir=model_dir)
-        write_calibration(tree_mlp, model_dir)  # <-- NEW
+        write_calibration(tree_mlp, model_dir)
+        write_residuals(tree_mlp, model_dir)
         predict_path = os.path.join(self.Log.decompressed_dir, 'decompressed.tif')
         save_img(predict_path, predict_data)
         ratio_actual = os.path.getsize(self.data_path)/get_folder_size(model_dir)

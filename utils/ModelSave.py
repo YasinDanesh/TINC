@@ -62,6 +62,38 @@ def write_calibration(tree_mlp: OctTreeMLP, model_dir: str, pred_norm=None, gt_n
         # don't fail the save on calibration problems
         pass
 
+def write_residuals(tree_mlp: OctTreeMLP, model_dir: str, pred_norm=None, gt_norm=None):
+    """
+    Write residual_leaves.npz with per-leaf MSE in the NORMALIZED space.
+    Never calls predict(); uses cached arrays produced by OctTreeMLP.predict().
+    """
+    try:
+        if pred_norm is None:
+            pred_norm = getattr(tree_mlp, "_last_pred_norm", None)
+        if gt_norm is None:
+            gt_norm = getattr(tree_mlp, "_last_gt_norm", None)
+        if pred_norm is None or gt_norm is None:
+            return  # nothing to do without cached arrays
+
+        num_levels = len(tree_mlp.opt.Network.level_info)
+        boxes = _tile_boxes(pred_norm.shape, num_levels=num_levels)
+        d = 2 ** (num_levels - 1)  # leaves per axis
+
+        MSE = np.zeros((d, d, d), dtype=np.float32)
+        idx = 0
+        for zi in range(d):
+            for yi in range(d):
+                for xi in range(d):
+                    z0,z1,y0,y1,x0,x1 = boxes[idx]; idx += 1
+                    p = pred_norm[z0:z1, y0:y1, x0:x1, 0].astype(np.float64, copy=False)
+                    g = gt_norm  [z0:z1, y0:y1, x0:x1, 0].astype(np.float64, copy=False)
+                    MSE[zi, yi, xi] = float(np.mean((p - g)**2))
+
+        np.savez_compressed(os.path.join(model_dir, "residual_leaves.npz"), mse=MSE)
+    except Exception:
+        # don't break saving if residual export fails
+        pass
+
 #adddd
 def save_model(model:MLP, model_path:str):
     if not os.path.exists(model_path):
@@ -187,35 +219,6 @@ def save_tree_models(tree_mlp:OctTreeMLP, model_dir:str):
     #adddd
     opt_path = os.path.join(model_dir, 'opt.yaml')
     OmegaConf.save(tree_mlp.opt, opt_path)
-    # === BEGIN: write per-leaf residuals (MSE in normalized space) ===
-    try:
-        # Predict WITHOUT calibration and WITHOUT denorm so we're in training/loss scale
-        pred_norm = tree_mlp.predict(
-            device='cpu', batch_size=131072, apply_calibration=False, denorm=False
-        )
-        if isinstance(pred_norm, torch.Tensor):
-            pred_norm = pred_norm.detach().cpu().numpy()
-
-        gt_norm = tree_mlp.data.detach().cpu().numpy() if hasattr(tree_mlp, "data") and (tree_mlp.data is not None) else None
-        if gt_norm is not None:
-            # MSE per leaf tile
-            num_levels = len(tree_mlp.opt.Network.level_info)
-            boxes = _tile_boxes(pred_norm.shape, num_levels=num_levels)
-            d = 2 ** (num_levels - 1)  # leaves per axis
-            MSE = np.zeros((d, d, d), dtype=np.float32)
-            idx = 0
-            for zi in range(d):
-                for yi in range(d):
-                    for xi in range(d):
-                        z0,z1,y0,y1,x0,x1 = boxes[idx]; idx += 1
-                        p = pred_norm[z0:z1, y0:y1, x0:x1, 0].astype(np.float64, copy=False)
-                        g = gt_norm  [z0:z1, y0:y1, x0:x1, 0].astype(np.float64, copy=False)
-                        MSE[zi, yi, xi] = float(np.mean((p - g)**2))
-            np.savez_compressed(os.path.join(model_dir, "residual_leaves.npz"), mse=MSE)
-    except Exception:
-        # Don't break saving if residual export fails
-        pass
-    # === END: write per-leaf residuals ===
 
 def load_tree_models(model_dir:str):
     opt_path = os.path.join(model_dir, 'opt.yaml')
