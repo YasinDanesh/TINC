@@ -12,6 +12,7 @@ from utils.OctTree import OctTreeMLP
 from utils.tool import read_img, save_img, get_folder_size
 from utils.metrics import eval_performance
 from utils.ModelSave import save_tree_models, write_calibration, write_residuals
+import csv
 
 class CompressFramework:
     def __init__(self, opt, Log) -> None:
@@ -35,6 +36,11 @@ class CompressFramework:
         sampler = tree_mlp.sampler
         optimizer = tree_mlp.optimizer
         lr_scheduler = tree_mlp.lr_scheduler
+        csv_path = os.path.join(self.Log.info_dir, "loss.csv")
+        os.makedirs(self.Log.info_dir, exist_ok=True)
+        with open(csv_path, "w", newline="") as f:
+            csv.writer(f).writerow(["step", "epoch", "loss", "lr"])
+
         metrics = {'psnr_best':0, 'psnr_epoch':0, 'ssim_best':0, 'ssim_epoch':0, 'acc200_best':0, 'acc200_epoch':0, 'acc500_best':0, 'acc500_epoch':0}
         pbar = tqdm(sampler, desc='Training', leave=True, dynamic_ncols=True, file=sys.stdout)
         for step, (sampled_idxs, sampled_coords) in enumerate(pbar): 
@@ -43,6 +49,16 @@ class CompressFramework:
             loss.backward()
             optimizer.step()
             lr_scheduler.step()
+            step_idx = step
+            try:
+                epoch_idx = int(getattr(sampler, "epochs_count", 0))
+            except Exception:
+                epoch_idx = 0
+            lr_now = float(optimizer.param_groups[0]["lr"]) if optimizer.param_groups else 0.0
+            with open(csv_path, "a", newline="") as f:
+                csv.writer(f).writerow([step_idx, epoch_idx, float(loss.item()), lr_now])
+
+
             if step % 20 == 0:
                 pbar.set_postfix_str(f"loss={loss.item():.6f}")
             if sampler.judge_eval(self.compress_opt.Eval.epochs):
@@ -50,6 +66,7 @@ class CompressFramework:
                 predict_data = tree_mlp.predict(device=self.compress_opt.Eval.device, batch_size=self.compress_opt.Eval.batch_size)
                 metrics['decode_time'] = time.time()-time_eval_start
                 psnr, ssim, acc200, acc500 = eval_performance(self.origin_data, predict_data)
+
                 if psnr > metrics['psnr_best']:
                     metrics['psnr_best'] = psnr
                     metrics['psnr_epoch'] = sampler.epochs_count
