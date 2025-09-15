@@ -284,7 +284,7 @@ class OctTreeMLP(nn.Module):
         self.lr_scheduler = self.init_lr_scheduler()
     
     def _bytes_per_param(self) -> int:
-        bpp = 4
+        bpp = 2
         try:
             if hasattr(self.opt, "Storage"):
                 S = self.opt.Storage
@@ -292,9 +292,11 @@ class OctTreeMLP(nn.Module):
                     return int(S.param_bytes)
                 if hasattr(S, "dtype") and str(S.dtype).lower() in ("float16", "fp16", "half"):
                     return 2
+                if hasattr(S, "dtype") and str(S.dtype).lower() in ("float32", "fp32"):
+                    return 4
         except Exception:
             pass
-        return 4
+        return bpp
 
 
     """init tree structure"""

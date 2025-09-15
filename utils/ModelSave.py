@@ -288,7 +288,7 @@ def load_tree_models(model_dir:str):
 
     # read storage meta (default to float32/4 if missing)
     meta_path = os.path.join(model_dir, "storage_meta.json")
-    storage_dtype_str, bpp = "float32", 4
+    storage_dtype_str, bpp = "float16", 2
     if os.path.exists(meta_path):
         with open(meta_path, "r") as f:
             _m = json.load(f)
