@@ -284,19 +284,17 @@ class OctTreeMLP(nn.Module):
         self.lr_scheduler = self.init_lr_scheduler()
     
     def _bytes_per_param(self) -> int:
-        bpp = 2
+        # derive from Storage.mode
+        mode = "fp32"
         try:
-            if hasattr(self.opt, "Storage"):
-                S = self.opt.Storage
-                if hasattr(S, "param_bytes") and S.param_bytes in (2, 4):
-                    return int(S.param_bytes)
-                if hasattr(S, "dtype") and str(S.dtype).lower() in ("float16", "fp16", "half"):
-                    return 2
-                if hasattr(S, "dtype") and str(S.dtype).lower() in ("float32", "fp32"):
-                    return 4
+            if hasattr(self.opt, "Storage") and hasattr(self.opt.Storage, "mode"):
+                mode = str(self.opt.Storage.mode).lower()
         except Exception:
             pass
-        return bpp
+        if mode in ("int8_tensor","int8_per_channel"): return 1
+        if mode == "fp16": return 2
+        return 4
+
 
 
     """init tree structure"""
