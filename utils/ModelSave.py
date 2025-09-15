@@ -28,8 +28,8 @@ def _storage_from_opt(opt):
       2) opt.Storage.dtype ('float16'/'fp16'/'half' or 'float32'),
       3) default float32 (4 bytes).
     """
-    dtype = "float32"
-    bpp = 4
+    dtype = "float16"
+    bpp = 2
     try:
         if hasattr(opt, "Storage"):
             S = opt.Storage
