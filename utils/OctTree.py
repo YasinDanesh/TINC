@@ -282,6 +282,20 @@ class OctTreeMLP(nn.Module):
         self.sampler = self.init_sampler()
         self.optimizer = self.init_optimizer()
         self.lr_scheduler = self.init_lr_scheduler()
+    
+    def _bytes_per_param(self) -> int:
+        bpp = 4
+        try:
+            if hasattr(self.opt, "Storage"):
+                S = self.opt.Storage
+                if hasattr(S, "param_bytes") and S.param_bytes in (2, 4):
+                    return int(S.param_bytes)
+                if hasattr(S, "dtype") and str(S.dtype).lower() in ("float16", "fp16", "half"):
+                    return 2
+        except Exception:
+            pass
+        return 4
+
 
     """init tree structure"""
     def init_tree(self):
@@ -319,10 +333,9 @@ class OctTreeMLP(nn.Module):
                     itemsize = np.dtype("uint16").itemsize  # safe fallback
 
                 origin_bytes = int(np.prod(shape) * itemsize)
-        #adddd
 
         ideal_bytes = int(origin_bytes/ratio)
-        ideal_params = int(ideal_bytes/4)
+        ideal_params = int(ideal_bytes / max(1, self._bytes_per_param()))
         level_info = self.opt.Network.level_info
         node_ratios = [info[0] for info in level_info]
         level_ratios = [node_ratios[i]*8**i for i in range(len(node_ratios))]
@@ -450,7 +463,7 @@ class OctTreeMLP(nn.Module):
         # print('Network bytes: {:.2f}KB({:.2f}MB); Origin bytes: {:.2f}KB({:.2f}MB)'.format(bytes/1024, bytes/1024**2, origin_bytes/1024, origin_bytes/1024**2))
         # print('Compression ratio: {:.2f}'.format(self.ratio))
         #addd
-        bytes = self.params_total * 4
+        bytes = self.params_total * self._bytes_per_param()
 
         # origin_bytes fallback (same logic as in get_hyper)
         if getattr(self, "data_path", None) and os.path.exists(self.data_path):
