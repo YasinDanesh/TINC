@@ -3,8 +3,8 @@ Reproduc:
   benchmark: true
   deterministic: false
 CompressFramwork:
-  Path: /kaggle/input/132out/complete_cube_0.tif
-  Ratio: 1024
+  Path: /kaggle/input/132out/brain-0_256-0_256-0_256.tif
+  Ratio: 64
   Train:
     #batch_size: 524288 
     #batch_size: 262144
@@ -12,7 +12,7 @@ CompressFramwork:
     #batch_size: 65536
     #epochs: 392
     #epochs: 196
-    epochs: 1
+    epochs: 784
     #epochs: 49
     device: cuda
     optimizer:
@@ -23,7 +23,7 @@ CompressFramwork:
       # milestones: [50000,80000]
       # gamma: 0.2
       name: CosineAnnealingLR
-      T_max: 100352 
+      T_max: 100352
       eta_min: 1e-6
     #weight: [2001,65535,0.01]
     weight: [0, 100, 1.0]
@@ -34,7 +34,7 @@ CompressFramwork:
     #batch_size: 65536
     #epochs: 392
     #epochs: 196
-    epochs: 98
+    epochs: 784
     #epochs: 49
     device: cuda
   Preprocess:
@@ -44,13 +44,17 @@ CompressFramwork:
     input: 3
     output: 1
     #level_info: [[1.0, 4, Sine, equal]]
-    level_info: [[3.0, 3, Sine, equal], [1.0, 3, Sine, equal]]
-    #level_info: [[4.0, 2, Sine, equal], [2.0, 2, Sine, equal],[1.0, 3, Sine, res_global]]
+    #level_info: [[3, 3, Sine, equal], [1.0, 3, Sine, equal]]
+    level_info: [[4.0, 3, Sine, equal], [1.0, 3, Sine, equal]]
+    #level_info: [[6.0, 2, Sine, equal], [3.0, 2, Sine, equal],[1.0, 3, Sine, equal]]
     #level_info: [[1.0, 2, Sine, equal], [0.8, 2, Sine, equal], [1.5, 3, Sine, aoi]]
-    w0: 30
+    w0: 40
   #ResAlloc:
-    #path: /kaggle/working/TINC/outputs/default_2025_0911_172915/compressed/models/residual_leaves.npz
+    #path: /kaggle/working/TINC/outputs/default_2025_0913_170015/compressed/models/residual_leaves.npz
     # alpha: 5.0
+  Storage:
+    compress: npz
+
 
 Log: 
   project_name: default

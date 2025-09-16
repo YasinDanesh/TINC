@@ -19,92 +19,42 @@ def _jsonable(o):
         return str(o)
     return o
 
-def _storage_from_opt(opt):
-    """
-    Returns (storage_dtype_str, bytes_per_param).
-    Priority:
-      1) opt.Storage.param_bytes (2 or 4),
-      2) opt.Storage.dtype ('float16'/'fp16'/'half' or 'float32'),
-      3) default float32 (4 bytes).
-    """
-    dtype = "float32"
-    bpp = 4
-    try:
-        if hasattr(opt, "Storage"):
-            S = opt.Storage
-            if hasattr(S, "param_bytes") and S.param_bytes in (2, 4):
-                bpp = int(S.param_bytes)
-                dtype = "float16" if bpp == 2 else "float32"
-            elif hasattr(S, "dtype") and str(S.dtype).lower() in ("float16", "fp16", "half"):
-                dtype, bpp = "float16", 2
-            elif hasattr(S, "dtype") and str(S.dtype).lower() in ("float32", "fp32"):
-                dtype, bpp = "float32", 4
-    except Exception:
-        pass
-    return dtype, bpp
-
-def _np_dtype_from_storage_str(s: str):
-    s = str(s).lower()
-    if s in ("float16", "fp16", "half"):
-        return np.float16
-    return np.float32
-
 def _storage_conf(opt):
-    """Returns a normalized storage config dict:
+    """
+    Returns normalized storage config dict:
        {'mode': 'fp32'|'fp16'|'int8_tensor'|'int8_per_channel',
-        'compress': 'none'|'npz'|'gzip',
+        'compress': 'none'|'npz',
         'percentile': float in (0,1] }
     """
-    mode = "fp32"; compress = "none"; perc = 1.0
+    mode = "int8_tensor"; compress = "none"; perc = 0.995
     if hasattr(opt, "Storage"):
         S = opt.Storage
-        if hasattr(S, "mode") and S.mode:
+        if getattr(S, "mode", None):
             mode = str(S.mode).lower()
-        if hasattr(S, "compress") and S.compress:
-            compress = str(S.compress).lower()
-        if hasattr(S, "percentile") and S.percentile:
+        if getattr(S, "compress", None):
+            compress = "npz" if str(S.compress).lower() == "npz" else "none"
+        if getattr(S, "percentile", None):
             try:
                 perc = float(S.percentile)
             except Exception:
-                perc = 1.0
+                perc = 0.995
             perc = min(max(perc, 0.5), 1.0)
     return {"mode": mode, "compress": compress, "percentile": perc}
 
-def _bytes_per_param_from_mode(mode: str) -> int:
-    if mode in ("int8_tensor","int8_per_channel"): return 1
-    if mode == "fp16": return 2
-    return 4  # fp32 default
 
 def _np_dtype_from_mode(mode: str):
     if mode == "fp16": return np.float16
     return np.float32
 
 def _save_array(path_base: str, arr: np.ndarray, compress: str):
-    """Save as raw .bin (none), or .npz (np.savez_compressed), or .gz."""
-    base, ext = path_base, ""
-    if compress == "npz":
-        np.savez_compressed(base + ".npz", a=arr)
-    elif compress == "gzip":
-        import gzip
-        with gzip.open(base + ".gz", "wb") as f:
-            f.write(arr.tobytes(order="C"))
-    else:
-        with open(base, "wb") as f:
-            f.write(arr.tobytes(order="C"))
+    with open(path_base, "wb") as f:
+        f.write(arr.tobytes(order="C"))
 
 def _load_array(path_base: str, dtype: np.dtype):
-    """Load from .npz/.gz/raw, in that order of preference."""
-    p_npz = path_base + ".npz"; p_gz = path_base + ".gz"; p_raw = path_base
-    if os.path.exists(p_npz):
-        z = np.load(p_npz); return z["a"].astype(dtype, copy=False)
-    if os.path.exists(p_gz):
-        import gzip
-        with gzip.open(p_gz, "rb") as f:
-            b = f.read()
-        return np.frombuffer(b, dtype=dtype)
-    with open(p_raw, "rb") as f:
+    with open(path_base, "rb") as f:
         b = f.read()
     return np.frombuffer(b, dtype=dtype)
+
 
 def _sym_quantize_tensor(x: np.ndarray, percentile: float = 1.0):
     """Per-tensor symmetric int8 quantization. Returns (q:int8, scale:float32)."""
@@ -143,6 +93,44 @@ def _dequant(q: np.ndarray, scale):
         return (q.astype(np.float32) * scale[:,None])
     else:
         return (q.astype(np.float32) * float(scale)).astype(np.float32)
+
+def _pack_tensors_to_blob(named_arrays):
+    """
+    named_arrays: list of (name:str, arr:np.ndarray with final dtype/shape)
+    returns (blob_u8: np.uint8, meta: dict[name -> {offset,nbytes,shape,dtype}])
+    """
+    offset = 0
+    pieces = []
+    meta = {}
+    for name, arr in named_arrays:
+        arr_c = np.ascontiguousarray(arr)
+        b = arr_c.tobytes(order="C")
+        nbytes = len(b)
+        meta[name] = {
+            "offset": int(offset),
+            "nbytes": int(nbytes),
+            "shape": list(arr_c.shape),
+            "dtype": np.dtype(arr_c.dtype).str,
+        }
+        pieces.append(b)
+        offset += nbytes
+    blob = np.frombuffer(b"".join(pieces), dtype=np.uint8)
+    return blob, meta
+
+def _unpack_tensors_from_blob(blob_u8, meta):
+    """
+    blob_u8: np.uint8 array; meta: dict as above
+    returns dict[name -> np.ndarray]
+    """
+    out = {}
+    raw = memoryview(blob_u8.tobytes())  # contiguous bytes
+    for name, info in meta.items():
+        off = int(info["offset"]); nbytes = int(info["nbytes"])
+        dt = np.dtype(info["dtype"]); shp = tuple(info["shape"])
+        chunk = raw[off:off+nbytes]
+        arr = np.frombuffer(chunk, dtype=dt).reshape(shp)
+        out[name] = np.array(arr, copy=True)  # materialize
+    return out
 
 
 def write_calibration(tree_mlp: OctTreeMLP, model_dir: str, pred_norm=None, gt_norm=None):
@@ -220,15 +208,24 @@ def write_residuals(tree_mlp: OctTreeMLP, model_dir: str, pred_norm=None, gt_nor
         # don't break saving if residual export fails
         pass
 
-def save_model(model:MLP, model_path:str, storage_conf=None):
+def save_model(model: MLP, model_path: str, storage_conf=None):
+    """
+    Save a single node's model as raw binary files only (compress: 'none').
+    Tree-level compression (compress: 'npz') is handled by save_tree_models().
+    """
     if not os.path.exists(model_path):
         os.makedirs(model_path)
     if storage_conf is None:
-        storage_conf = {"mode":"fp32","compress":"none","percentile":1.0}
+        storage_conf = {"mode": "int8_tensor", "compress": "none", "percentile": 0.995}
 
-    mode = storage_conf["mode"]
-    compress = storage_conf["compress"]
-    perc = storage_conf["percentile"]
+    mode = storage_conf.get("mode", "int8_tensor")
+    compress = storage_conf.get("compress", "none")
+    perc = float(storage_conf.get("percentile", 0.995))
+
+    if compress != "none":
+        raise ValueError("save_model only supports compress='none'. "
+                         "Use save_tree_models(model_dir) for compress='npz'.")
+
     float_store = _np_dtype_from_mode(mode)
 
     for i in range(len(model.net)):
@@ -236,44 +233,55 @@ def save_model(model:MLP, model_path:str, storage_conf=None):
         W = layer[0].weight.detach().cpu().numpy()
         B = layer[0].bias.detach().cpu().numpy()
 
-        if mode == "fp32" or mode == "fp16":
-            _save_array(os.path.join(model_path, f"{i}-W"), W.astype(float_store), compress)
-            _save_array(os.path.join(model_path, f"{i}-B"), B.astype(float_store), compress)
+        if mode in ("fp32", "fp16"):
+            _save_array(os.path.join(model_path, f"{i}-W"), W.astype(float_store), "none")
+            _save_array(os.path.join(model_path, f"{i}-B"), B.astype(float_store), "none")
 
         elif mode == "int8_tensor":
             qW, sW = _sym_quantize_tensor(W, percentile=perc)
             qB, sB = _sym_quantize_tensor(B, percentile=perc)
-            _save_array(os.path.join(model_path, f"{i}-W.q8"), qW, compress)
-            _save_array(os.path.join(model_path, f"{i}-B.q8"), qB, compress)
-            _save_array(os.path.join(model_path, f"{i}-W.scale"), np.array([sW], dtype=np.float32), compress)
-            _save_array(os.path.join(model_path, f"{i}-B.scale"), np.array([sB], dtype=np.float32), compress)
+            _save_array(os.path.join(model_path, f"{i}-W.q8"), qW, "none")
+            _save_array(os.path.join(model_path, f"{i}-B.q8"), qB, "none")
+            _save_array(os.path.join(model_path, f"{i}-W.scale"), np.array([sW], dtype=np.float32), "none")
+            _save_array(os.path.join(model_path, f"{i}-B.scale"), np.array([sB], dtype=np.float32), "none")
 
         elif mode == "int8_per_channel":
             if W.ndim != 2:
                 raise ValueError("int8_per_channel expects 2D weight")
             qW, sW = _sym_quantize_per_outrow(W, percentile=perc)
             qB, sB = _sym_quantize_tensor(B, percentile=perc)
-            _save_array(os.path.join(model_path, f"{i}-W.q8"), qW, compress)
-            _save_array(os.path.join(model_path, f"{i}-W.scale"), sW, compress)
-            _save_array(os.path.join(model_path, f"{i}-B.q8"), qB, compress)
-            _save_array(os.path.join(model_path, f"{i}-B.scale"), np.array([sB], dtype=np.float32), compress)
+            _save_array(os.path.join(model_path, f"{i}-W.q8"), qW, "none")
+            _save_array(os.path.join(model_path, f"{i}-W.scale"), sW.astype(np.float32), "none")
+            _save_array(os.path.join(model_path, f"{i}-B.q8"), qB, "none")
+            _save_array(os.path.join(model_path, f"{i}-B.scale"), np.array([sB], dtype=np.float32), "none")
 
         else:
             raise ValueError(f"Unknown Storage.mode: {mode}")
 
 
+
 def load_model(model_path, hyper, storage_conf=None):
+    """
+    Load a single node's model from raw binary files only (compress: 'none').
+    Tree-level compression (compress: 'npz') is handled by load_tree_models().
+    """
     model = MLP(**hyper)
     if storage_conf is None:
-        storage_conf = {"mode":"fp32","compress":"none","percentile":1.0}
+        storage_conf = {"mode": "int8_tensor", "compress": "none", "percentile": 0.995}
 
-    mode = storage_conf["mode"]
+    mode = storage_conf.get("mode", "int8_tensor")
+    compress = storage_conf.get("compress", "none")
+
+    if compress != "none":
+        raise ValueError("load_model only supports compress='none'. "
+                         "Use load_tree_models(model_dir) for compress='npz'.")
+
     for i in range(len(model.net)):
         layer = model.net[i]
         W_shape = layer[0].weight.shape
         B_shape = layer[0].bias.shape
 
-        if mode in ("fp32","fp16"):
+        if mode in ("fp32", "fp16"):
             W = _load_array(os.path.join(model_path, f"{i}-W"), np.float32).reshape(W_shape)
             B = _load_array(os.path.join(model_path, f"{i}-B"), np.float32).reshape(B_shape)
 
@@ -306,64 +314,59 @@ def load_model(model_path, hyper, storage_conf=None):
 
 def load_model_from_files(model_path: str, in_dim: int, layer: int, act: str, output_act: bool, w0: int,
                           storage_conf=None):
+    """
+    Infer hidden/out dims and load a node from raw files only (compress: 'none').
+    Tree-level compressed loading is handled by load_tree_models().
+    """
     if storage_conf is None:
-        storage_conf = {"mode":"fp32","compress":"none","percentile":1.0}
-    mode = storage_conf["mode"]
+        storage_conf = {"mode": "int8_tensor", "compress": "none", "percentile": 0.995}
+    mode = storage_conf.get("mode", "int8_tensor")
+    compress = storage_conf.get("compress", "none")
 
-    # Infer hidden/out from first and last layer files
-    def _count_elems(path_base: str):
-        for ext in (".npz",".gz",""):
-            p = path_base + ext
-            if os.path.exists(p):
-                sz = os.path.getsize(p)
-                if ext == ".npz":
-                    # cannot infer elem count from zip; we’ll load to infer
-                    a = _load_array(path_base, np.int8 if path_base.endswith(".q8") else np.float32)
-                    return a.size
-                else:
-                    # raw stream: need bytes-per-elem by mode
-                    bpe = 1 if path_base.endswith(".q8") or mode.startswith("int8") else (2 if mode=="fp16" else 4)
-                    return sz // bpe
-        raise FileNotFoundError(path_base)
+    if compress != "none":
+        raise ValueError("load_model_from_files only supports compress='none'. "
+                         "Use load_tree_models() for compress='npz'.")
 
-    # first layer weight name base
+    def _count_elems_raw(path_base: str):
+        p = path_base
+        if os.path.exists(p):
+            sz = os.path.getsize(p)
+            bpe = 1 if (path_base.endswith(".q8") or mode.startswith("int8")) else (2 if mode == "fp16" else 4)
+            return sz // bpe
+        raise FileNotFoundError(p)
+
+    # Infer hidden from first layer W
     first_W_base = os.path.join(model_path, '0-W' + ('.q8' if mode.startswith('int8') else ''))
-    nfloat = _count_elems(first_W_base)
+    nfloat = _count_elems_raw(first_W_base)
     if in_dim <= 0 or (nfloat % in_dim) != 0:
         raise ValueError(f"First layer size mismatch: {nfloat} elems not divisible by in_dim={in_dim}")
     hidden = nfloat // in_dim
 
-    # last layer infer out_dim from bias if present, else from weight
+    # Infer out from last bias if present; else from last W rows
     b_last_base = os.path.join(model_path, f'{layer-1}-B' + ('.q8' if mode.startswith('int8') else ''))
     try:
-        n_b = _count_elems(b_last_base)
+        n_b = _count_elems_raw(b_last_base)
         out_dim = n_b
     except Exception:
         last_W_base = os.path.join(model_path, f'{layer-1}-W' + ('.q8' if mode.startswith('int8') else ''))
-        n_w = _count_elems(last_W_base)
+        n_w = _count_elems_raw(last_W_base)
         if n_w % hidden != 0:
             raise ValueError(f"Last layer size mismatch: {n_w} elems not divisible by hidden={hidden}")
         out_dim = n_w // hidden
 
     model = MLP(input=int(in_dim), output=int(out_dim), hidden=int(hidden),
                 layer=int(layer), act=act, output_act=bool(output_act), w0=int(w0))
-
-    # Load tensors via unified loader above
     loaded = load_model(model_path, model.hyper, storage_conf=storage_conf)
     return loaded, int(out_dim)
-
 
 def save_tree_models(tree_mlp:OctTreeMLP, model_dir:str):
     if not os.path.exists(model_dir):
         os.makedirs(model_dir)
 
     S = _storage_conf(tree_mlp.opt)
-    # write all node models with chosen storage
-    for node in tree_mlp.node_list:
-        model_path = os.path.join(model_dir, f'{node.level}-{node.di}-{node.hi}-{node.wi}')
-        save_model(model=node.net, model_path=model_path, storage_conf=S)
+    mode = S["mode"]; compress = S["compress"]; perc = S["percentile"]
 
-    # norm stats + opt as before
+    # Always write stats/opt/meta
     stats = {k: _jsonable(v) for k, v in dict(tree_mlp.side_info).items()}
     try: shape = list(tree_mlp.data.shape)
     except Exception: shape = list(getattr(tree_mlp, "origin_shape", []))
@@ -377,13 +380,54 @@ def save_tree_models(tree_mlp:OctTreeMLP, model_dir:str):
         stats["origin_bytes"] = None
     with open(os.path.join(model_dir, "norm_stats.json"), "w") as f:
         json.dump(stats, f)
-
     OmegaConf.save(tree_mlp.opt, os.path.join(model_dir, 'opt.yaml'))
 
-    # storage meta
-    meta = {"mode": S["mode"], "compress": S["compress"], "percentile": S["percentile"]}
+    meta = {"mode": mode, "compress": compress, "percentile": perc, "format_version": 1}
     with open(os.path.join(model_dir, "storage_meta.json"), "w") as f:
         json.dump(meta, f)
+
+    if compress == "npz":
+        # Build a single list of all tensors across the entire tree
+        named = []
+        for node in tree_mlp.node_list:
+            node_id = f"{node.level}-{node.di}-{node.hi}-{node.wi}"
+            for li in range(len(node.net.net)):
+                layer = node.net.net[li]
+                W = layer[0].weight.detach().cpu().numpy()
+                B = layer[0].bias.detach().cpu().numpy()
+
+                if mode in ("fp32","fp16"):
+                    named.append((f"{node_id}|{li}-W", W.astype(_np_dtype_from_mode(mode))))
+                    named.append((f"{node_id}|{li}-B", B.astype(_np_dtype_from_mode(mode))))
+                elif mode == "int8_tensor":
+                    qW, sW = _sym_quantize_tensor(W, percentile=perc)
+                    qB, sB = _sym_quantize_tensor(B, percentile=perc)
+                    named.append((f"{node_id}|{li}-W.q8", qW))
+                    named.append((f"{node_id}|{li}-B.q8", qB))
+                    named.append((f"{node_id}|{li}-W.scale", np.array([sW], dtype=np.float32)))
+                    named.append((f"{node_id}|{li}-B.scale", np.array([sB], dtype=np.float32)))
+                elif mode == "int8_per_channel":
+                    if W.ndim != 2:
+                        raise ValueError("int8_per_channel expects 2D weight")
+                    qW, sW = _sym_quantize_per_outrow(W, percentile=perc)
+                    qB, sB = _sym_quantize_tensor(B, percentile=perc)
+                    named.append((f"{node_id}|{li}-W.q8", qW))
+                    named.append((f"{node_id}|{li}-W.scale", sW.astype(np.float32)))
+                    named.append((f"{node_id}|{li}-B.q8", qB))
+                    named.append((f"{node_id}|{li}-B.scale", np.array([sB], dtype=np.float32)))
+                else:
+                    raise ValueError(f"Unknown Storage.mode: {mode}")
+
+        blob, meta_tbl = _pack_tensors_to_blob(named)
+        np.savez_compressed(os.path.join(model_dir, "tree_packed.npz"),
+                            blob=blob, meta=np.array([json.dumps(meta_tbl)], dtype=object))
+        return
+
+    # ---- compress == "none": legacy raw files per node/layer (fast) ----
+    for node in tree_mlp.node_list:
+        model_path = os.path.join(model_dir, f'{node.level}-{node.di}-{node.hi}-{node.wi}')
+        save_model(model=node.net, model_path=model_path, storage_conf=S)
+
 
 
 
@@ -393,7 +437,7 @@ def load_tree_models(model_dir:str):
 
     # storage meta
     meta_path = os.path.join(model_dir, "storage_meta.json")
-    S = {"mode":"fp32","compress":"none","percentile":1.0}
+    S = {"mode":"int8_tensor","compress":"none","percentile":0.995}
     if os.path.exists(meta_path):
         with open(meta_path, "r") as f:
             m = json.load(f)
@@ -412,23 +456,67 @@ def load_tree_models(model_dir:str):
     tree_mlp = OctTreeMLP(opt, origin_shape=origin_shape, load_data=False)
     tree_mlp.model_dir = model_dir
 
-    def _load_node_recursive(node, in_dim: int):
-        h = node.net.hyper
-        model_path = os.path.join(model_dir, f"{node.level}-{node.di}-{node.hi}-{node.wi}")
-        model, out_dim = load_model_from_files(
-            model_path=model_path,
-            in_dim=int(in_dim),
-            layer=int(h['layer']),
-            act=h['act'],
-            output_act=bool(h['output_act']),
-            w0=int(h['w0']),
-            storage_conf=S,
-        )
-        node.net = model
-        for child in node.children:
-            _load_node_recursive(child, out_dim)
+    compress = S.get("compress","none")
+    mode = S.get("mode","int8_tensor")
 
-    _load_node_recursive(tree_mlp.base_node, int(opt.Network.input))
+    if compress == "npz" and os.path.exists(os.path.join(model_dir, "tree_packed.npz")):
+        z = np.load(os.path.join(model_dir, "tree_packed.npz"), allow_pickle=True)
+        meta_tbl = json.loads(str(z["meta"][0]))
+        arrays = _unpack_tensors_from_blob(z["blob"], meta_tbl)
+
+        def _assign_node_from_archive(node):
+            node_id = f"{node.level}-{node.di}-{node.hi}-{node.wi}"
+            for li in range(len(node.net.net)):
+                layer = node.net.net[li]
+                W_shape = layer[0].weight.shape
+                B_shape = layer[0].bias.shape
+                if mode in ("fp32","fp16"):
+                    W = arrays[f"{node_id}|{li}-W"].astype(np.float32, copy=False).reshape(W_shape)
+                    B = arrays[f"{node_id}|{li}-B"].astype(np.float32, copy=False).reshape(B_shape)
+                elif mode == "int8_tensor":
+                    qW = arrays[f"{node_id}|{li}-W.q8"].astype(np.int8, copy=False).reshape(W_shape)
+                    qB = arrays[f"{node_id}|{li}-B.q8"].astype(np.int8, copy=False).reshape(B_shape)
+                    sW = arrays[f"{node_id}|{li}-W.scale"].astype(np.float32, copy=False).ravel()[0]
+                    sB = arrays[f"{node_id}|{li}-B.scale"].astype(np.float32, copy=False).ravel()[0]
+                    W = _dequant(qW, sW); B = _dequant(qB, sB)
+                elif mode == "int8_per_channel":
+                    qW = arrays[f"{node_id}|{li}-W.q8"].astype(np.int8, copy=False).reshape(W_shape)
+                    sW = arrays[f"{node_id}|{li}-W.scale"].astype(np.float32, copy=False)
+                    if sW.ndim != 1 or sW.shape[0] != W_shape[0]:
+                        raise ValueError("Bad per-channel scale shape")
+                    qB = arrays[f"{node_id}|{li}-B.q8"].astype(np.int8, copy=False).reshape(B_shape)
+                    sB = arrays[f"{node_id}|{li}-B.scale"].astype(np.float32, copy=False).ravel()[0]
+                    W = _dequant(qW, sW); B = _dequant(qB, sB)
+                else:
+                    raise ValueError(f"Unknown Storage.mode: {mode}")
+
+                with torch.no_grad():
+                    layer[0].weight.data = torch.tensor(W, dtype=torch.float32)
+                    layer[0].bias.data   = torch.tensor(B, dtype=torch.float32)
+
+            for ch in node.children:
+                _assign_node_from_archive(ch)
+
+        _assign_node_from_archive(tree_mlp.base_node)
+
+    else:
+        # fallback: raw per-node files (compress == "none")
+        def _load_node_recursive(node, in_dim: int):
+            h = node.net.hyper
+            model_path = os.path.join(model_dir, f"{node.level}-{node.di}-{node.hi}-{node.wi}")
+            model, out_dim = load_model_from_files(
+                model_path=model_path,
+                in_dim=int(in_dim),
+                layer=int(h['layer']),
+                act=h['act'],
+                output_act=bool(h['output_act']),
+                w0=int(h['w0']),
+                storage_conf=S,
+            )
+            node.net = model
+            for child in node.children:
+                _load_node_recursive(child, out_dim)
+        _load_node_recursive(tree_mlp.base_node, int(opt.Network.input))
 
     if saved_stats:
         if "dtype" in saved_stats:
@@ -436,5 +524,4 @@ def load_tree_models(model_dir:str):
         tree_mlp.side_info.update(saved_stats)
 
     return tree_mlp
-
 

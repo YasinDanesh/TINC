@@ -273,9 +273,8 @@ class OctTreeMLP(nn.Module):
         except Exception:
             pass
         
-        # Build leaves list BEFORE attaching residuals
-        self.init_network()      # creates net hyper placeholders
-        self.init_node_list()    # populates leaf_node_list, etc.
+        self.init_network() 
+        self.init_node_list() 
         
         self.cal_params_total()
         self.move2device(self.device)
@@ -284,18 +283,16 @@ class OctTreeMLP(nn.Module):
         self.lr_scheduler = self.init_lr_scheduler()
     
     def _bytes_per_param(self) -> int:
-        # derive from Storage.mode
-        mode = "fp32"
+        # Default aligned with ModelSave._storage_conf
+        mode = "int8_tensor"
         try:
-            if hasattr(self.opt, "Storage") and hasattr(self.opt.Storage, "mode"):
+            if hasattr(self.opt, "Storage") and getattr(self.opt.Storage, "mode", None):
                 mode = str(self.opt.Storage.mode).lower()
         except Exception:
             pass
-        if mode in ("int8_tensor","int8_per_channel"): return 1
+        if mode in ("int8_tensor", "int8_per_channel"): return 1
         if mode == "fp16": return 2
         return 4
-
-
 
     """init tree structure"""
     def init_tree(self):
