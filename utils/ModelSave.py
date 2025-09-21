@@ -261,10 +261,6 @@ def save_model(model: MLP, model_path: str, storage_conf=None):
 
 
 def load_model(model_path, hyper, storage_conf=None):
-    """
-    Load a single node's model from raw binary files only (compress: 'none').
-    Tree-level compression (compress: 'npz') is handled by load_tree_models().
-    """
     model = MLP(**hyper)
     if storage_conf is None:
         storage_conf = {"mode": "int8_tensor", "compress": "none", "percentile": 0.995}
@@ -273,8 +269,7 @@ def load_model(model_path, hyper, storage_conf=None):
     compress = storage_conf.get("compress", "none")
 
     if compress != "none":
-        raise ValueError("load_model only supports compress='none'. "
-                         "Use load_tree_models(model_dir) for compress='npz'.")
+        raise ValueError("load_model only supports compress='none'. Use load_tree_models(model_dir) for compress='npz'.")
 
     for i in range(len(model.net)):
         layer = model.net[i]
@@ -282,8 +277,9 @@ def load_model(model_path, hyper, storage_conf=None):
         B_shape = layer[0].bias.shape
 
         if mode in ("fp32", "fp16"):
-            W = _load_array(os.path.join(model_path, f"{i}-W"), np.float32).reshape(W_shape)
-            B = _load_array(os.path.join(model_path, f"{i}-B"), np.float32).reshape(B_shape)
+            dt = _np_dtype_from_mode(mode)   # np.float32 or np.float16
+            W = _load_array(os.path.join(model_path, f"{i}-W"), dt).reshape(W_shape).astype(np.float32, copy=False)
+            B = _load_array(os.path.join(model_path, f"{i}-B"), dt).reshape(B_shape).astype(np.float32, copy=False)
 
         elif mode == "int8_tensor":
             qW = _load_array(os.path.join(model_path, f"{i}-W.q8"), np.int8).reshape(W_shape)
@@ -453,7 +449,9 @@ def load_tree_models(model_dir:str):
         if isinstance(saved_stats.get("shape", None), list):
             origin_shape = tuple(saved_stats["shape"])
 
-    tree_mlp = OctTreeMLP(opt, origin_shape=origin_shape, load_data=False)
+    tree_mlp = OctTreeMLP(opt, origin_shape=origin_shape, load_data=False,
+                        model_dir=model_dir, defer_build=True)
+
     tree_mlp.model_dir = model_dir
 
     compress = S.get("compress","none")
@@ -464,43 +462,119 @@ def load_tree_models(model_dir:str):
         meta_tbl = json.loads(str(z["meta"][0]))
         arrays = _unpack_tensors_from_blob(z["blob"], meta_tbl)
 
-        def _assign_node_from_archive(node):
+        def _wkey(node_id, li): return f"{node_id}|{li}-W.q8" if mode.startswith("int8") else f"{node_id}|{li}-W"
+        def _bkey(node_id, li): return f"{node_id}|{li}-B.q8" if mode.startswith("int8") else f"{node_id}|{li}-B"
+
+        def _infer_dims_from_meta(node_id, layers, in_dim_expected):
+            first = meta_tbl[_wkey(node_id, 0)]["shape"]  # (out, in)
+            hidden, in_dim = int(first[0]), int(first[1])
+            if in_dim_expected is not None and in_dim != int(in_dim_expected):
+                raise ValueError(f"in_dim mismatch for {node_id}: archive={in_dim}, expected={in_dim_expected}")
+            last_bk = _bkey(node_id, layers-1)
+            if last_bk in meta_tbl:
+                out_dim = int(meta_tbl[last_bk]["shape"][0])
+            else:
+                last_wk = _wkey(node_id, layers-1)
+                out_dim = int(meta_tbl[last_wk]["shape"][0])
+            return hidden, out_dim
+
+        # Fill per-level settings (act/layer/output_act) without constructing nets
+        from types import SimpleNamespace  # put this at the top of the file if not already imported
+
+        # Fill per-level settings (act/layer/output_act) without constructing nets
+        tree_mlp.get_hyper()
+
+        def _attach_hypers(n):
+            layer, act = tree_mlp.level_layer[n.level], tree_mlp.level_act[n.level]
+            # store hyper fields only; no network is built here
+            n.net = SimpleNamespace(hyper={
+                "input": None,          # will be provided by parent during rebuild
+                "output": None,         # inferred from archive meta
+                "hidden": None,         # inferred from archive meta
+                "layer": int(layer),
+                "act": act,
+                "output_act": bool(n.level < tree_mlp.max_level),
+                "w0": int(tree_mlp.opt.Network.w0),
+            })
+            for ch in n.children:
+                _attach_hypers(ch)
+
+        _attach_hypers(tree_mlp.base_node)
+
+
+        def _rebuild_and_load(node, in_dim_expected):
             node_id = f"{node.level}-{node.di}-{node.hi}-{node.wi}"
-            for li in range(len(node.net.net)):
-                layer = node.net.net[li]
+            hconf = node.net.hyper
+            layers = int(hconf["layer"])
+
+            hidden, out_dim = _infer_dims_from_meta(node_id, layers, in_dim_expected)
+
+            # build exact MLP
+            model = MLP(input=int(in_dim_expected), output=int(out_dim), hidden=int(hidden),
+                        layer=layers, act=hconf["act"], output_act=bool(hconf["output_act"]), w0=int(hconf["w0"]))
+
+            # load weights
+            for li in range(layers):
+                layer = model.net[li]
                 W_shape = layer[0].weight.shape
                 B_shape = layer[0].bias.shape
                 if mode in ("fp32","fp16"):
-                    W = arrays[f"{node_id}|{li}-W"].astype(np.float32, copy=False).reshape(W_shape)
-                    B = arrays[f"{node_id}|{li}-B"].astype(np.float32, copy=False).reshape(B_shape)
+                    W = arrays[_wkey(node_id, li)].astype(np.float32, copy=False).reshape(W_shape)
+                    B = arrays[_bkey(node_id, li)].astype(np.float32, copy=False).reshape(B_shape)
                 elif mode == "int8_tensor":
-                    qW = arrays[f"{node_id}|{li}-W.q8"].astype(np.int8, copy=False).reshape(W_shape)
-                    qB = arrays[f"{node_id}|{li}-B.q8"].astype(np.int8, copy=False).reshape(B_shape)
+                    qW = arrays[_wkey(node_id, li)].astype(np.int8, copy=False).reshape(W_shape)
+                    qB = arrays[_bkey(node_id, li)].astype(np.int8, copy=False).reshape(B_shape)
                     sW = arrays[f"{node_id}|{li}-W.scale"].astype(np.float32, copy=False).ravel()[0]
                     sB = arrays[f"{node_id}|{li}-B.scale"].astype(np.float32, copy=False).ravel()[0]
                     W = _dequant(qW, sW); B = _dequant(qB, sB)
-                elif mode == "int8_per_channel":
-                    qW = arrays[f"{node_id}|{li}-W.q8"].astype(np.int8, copy=False).reshape(W_shape)
+                else:  # int8_per_channel
+                    qW = arrays[_wkey(node_id, li)].astype(np.int8, copy=False).reshape(W_shape)
                     sW = arrays[f"{node_id}|{li}-W.scale"].astype(np.float32, copy=False)
                     if sW.ndim != 1 or sW.shape[0] != W_shape[0]:
                         raise ValueError("Bad per-channel scale shape")
-                    qB = arrays[f"{node_id}|{li}-B.q8"].astype(np.int8, copy=False).reshape(B_shape)
+                    qB = arrays[_bkey(node_id, li)].astype(np.int8, copy=False).reshape(B_shape)
                     sB = arrays[f"{node_id}|{li}-B.scale"].astype(np.float32, copy=False).ravel()[0]
                     W = _dequant(qW, sW); B = _dequant(qB, sB)
-                else:
-                    raise ValueError(f"Unknown Storage.mode: {mode}")
 
                 with torch.no_grad():
                     layer[0].weight.data = torch.tensor(W, dtype=torch.float32)
                     layer[0].bias.data   = torch.tensor(B, dtype=torch.float32)
 
+            node.net = model
             for ch in node.children:
-                _assign_node_from_archive(ch)
+                _rebuild_and_load(ch, out_dim)
 
-        _assign_node_from_archive(tree_mlp.base_node)
+        _rebuild_and_load(tree_mlp.base_node, int(opt.Network.input))
+
+        # finalize minimal runtime state for decode
+        tree_mlp.init_node_list()
+        tree_mlp.cal_params_total()
+        tree_mlp.move2device(tree_mlp.device)
+        tree_mlp.sampler = tree_mlp.init_sampler()
 
     else:
         # fallback: raw per-node files (compress == "none")
+        from types import SimpleNamespace  # put at top of file if not present
+
+        # For compress == "none": attach per-node hyper placeholders (no MLP constructed yet)
+        tree_mlp.get_hyper()
+
+        def _attach_hypers_raw(n):
+            layer, act = tree_mlp.level_layer[n.level], tree_mlp.level_act[n.level]
+            n.net = SimpleNamespace(hyper={
+                "input": None,          # provided by parent during recursion
+                "output": None,         # inferred by load_model_from_files
+                "hidden": None,         # inferred by load_model_from_files
+                "layer": int(layer),
+                "act": act,
+                "output_act": bool(n.level < tree_mlp.max_level),
+                "w0": int(tree_mlp.opt.Network.w0),
+            })
+            for ch in n.children:
+                _attach_hypers_raw(ch)
+
+        _attach_hypers_raw(tree_mlp.base_node)
+
         def _load_node_recursive(node, in_dim: int):
             h = node.net.hyper
             model_path = os.path.join(model_dir, f"{node.level}-{node.di}-{node.hi}-{node.wi}")
@@ -517,6 +591,10 @@ def load_tree_models(model_dir:str):
             for child in node.children:
                 _load_node_recursive(child, out_dim)
         _load_node_recursive(tree_mlp.base_node, int(opt.Network.input))
+        tree_mlp.init_node_list()
+        tree_mlp.cal_params_total()
+        tree_mlp.move2device(tree_mlp.device)
+        tree_mlp.sampler = tree_mlp.init_sampler()
 
     if saved_stats:
         if "dtype" in saved_stats:

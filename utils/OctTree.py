@@ -155,11 +155,15 @@ def cal_hidden_output(param, layer, input, output:int=None):
 
 class OctTreeMLP(nn.Module):
     #def __init__(self, opt) -> None:
-    def __init__(self, opt, origin_shape=None, load_data: bool = True, **kwargs) -> None:
+    def __init__(self, opt, origin_shape=None, load_data: bool = True,
+                 model_dir: str = None, defer_build: bool = False, **kwargs) -> None:
+
         super().__init__()
         self.opt = opt
         self.max_level = len(opt.Network.level_info)-1
         self.device = opt.Train.device
+        self.model_dir = model_dir
+
         #addd
         # Support both opt.Path and opt.CompressFramwork.Path
         self.data_path = getattr(opt, "Path", None)
@@ -220,16 +224,21 @@ class OctTreeMLP(nn.Module):
                 self.res_eps = float(self.opt.ResAlloc.eps)
         
         def _load_residual_grid():
-            # 1) explicit YAML path
+            # 1) explicit YAML path (resolve relative to model_dir if needed)
             path = None
             if hasattr(self.opt, "ResAlloc") and hasattr(self.opt.ResAlloc, "path") and self.opt.ResAlloc.path:
-                path = str(self.opt.ResAlloc.path)
-            # 2) next to model_dir (decode/fine-tune case)
-            if (path is None) and hasattr(self, "model_dir") and self.model_dir:
+                p = str(self.opt.ResAlloc.path)
+                if not os.path.isabs(p) and self.model_dir:
+                    p = os.path.join(self.model_dir, p)
+                if os.path.exists(p):
+                    path = p
+            # 2) try co-located file next to model_dir
+            if (path is None) and self.model_dir:
                 cand = os.path.join(self.model_dir, "residual_leaves.npz")
                 if os.path.exists(cand):
                     path = cand
             return path
+
         
         def _attach_residuals_from_grid(MSE):
             # Fill per-leaf residuals
@@ -269,13 +278,15 @@ class OctTreeMLP(nn.Module):
                 if MSE.shape == (expected, expected, expected):
                     _attach_residuals_from_grid(MSE)
                     self.residual_loaded = True
-                    print("residuals loaded before allocation")  # debug if you like
+                    print("residuals loaded before allocation")
         except Exception:
             pass
+
+        if defer_build:
+            return
         
         self.init_network() 
         self.init_node_list() 
-        
         self.cal_params_total()
         self.move2device(self.device)
         self.sampler = self.init_sampler()
