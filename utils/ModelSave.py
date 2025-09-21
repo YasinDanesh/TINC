@@ -26,7 +26,7 @@ def _storage_conf(opt):
         'compress': 'none'|'npz',
         'percentile': float in (0,1] }
     """
-    mode = "int8_tensor"; compress = "none"; perc = 0.995
+    mode = "int8_tensor"; compress = "none"; perc = 0.999
     if hasattr(opt, "Storage"):
         S = opt.Storage
         if getattr(S, "mode", None):
@@ -37,7 +37,7 @@ def _storage_conf(opt):
             try:
                 perc = float(S.percentile)
             except Exception:
-                perc = 0.995
+                perc = 0.999
             perc = min(max(perc, 0.5), 1.0)
     return {"mode": mode, "compress": compress, "percentile": perc}
 
@@ -216,11 +216,11 @@ def save_model(model: MLP, model_path: str, storage_conf=None):
     if not os.path.exists(model_path):
         os.makedirs(model_path)
     if storage_conf is None:
-        storage_conf = {"mode": "int8_tensor", "compress": "none", "percentile": 0.995}
+        storage_conf = {"mode": "int8_tensor", "compress": "none", "percentile": 0.999}
 
     mode = storage_conf.get("mode", "int8_tensor")
     compress = storage_conf.get("compress", "none")
-    perc = float(storage_conf.get("percentile", 0.995))
+    perc = float(storage_conf.get("percentile", 0.999))
 
     if compress != "none":
         raise ValueError("save_model only supports compress='none'. "
@@ -263,7 +263,7 @@ def save_model(model: MLP, model_path: str, storage_conf=None):
 def load_model(model_path, hyper, storage_conf=None):
     model = MLP(**hyper)
     if storage_conf is None:
-        storage_conf = {"mode": "int8_tensor", "compress": "none", "percentile": 0.995}
+        storage_conf = {"mode": "int8_tensor", "compress": "none", "percentile": 0.999}
 
     mode = storage_conf.get("mode", "int8_tensor")
     compress = storage_conf.get("compress", "none")
@@ -315,7 +315,7 @@ def load_model_from_files(model_path: str, in_dim: int, layer: int, act: str, ou
     Tree-level compressed loading is handled by load_tree_models().
     """
     if storage_conf is None:
-        storage_conf = {"mode": "int8_tensor", "compress": "none", "percentile": 0.995}
+        storage_conf = {"mode": "int8_tensor", "compress": "none", "percentile": 0.999}
     mode = storage_conf.get("mode", "int8_tensor")
     compress = storage_conf.get("compress", "none")
 
@@ -433,7 +433,7 @@ def load_tree_models(model_dir:str):
 
     # storage meta
     meta_path = os.path.join(model_dir, "storage_meta.json")
-    S = {"mode":"int8_tensor","compress":"none","percentile":0.995}
+    S = {"mode":"int8_tensor","compress":"none","percentile":0.999}
     if os.path.exists(meta_path):
         with open(meta_path, "r") as f:
             m = json.load(f)
